@@ -596,3 +596,64 @@ def test_activity_page_lists_past_jobs_with_their_logs(client, workspace):
 
     older = client.get(f"/jobs?job={first.id}").text
     assert "older output" in older
+
+
+# --- knowing about the browser before you need it ---------------------------
+
+
+def test_status_reports_whether_a_browser_is_available(client):
+    body = client.get("/api/status").json()
+    assert "browser" in body
+    assert isinstance(body["browser"]["available"], bool)
+
+
+def test_the_ui_warns_and_disables_when_there_is_no_browser(workspace, monkeypatch):
+    """Finding out mid-job is too late; the buttons that need it are disabled."""
+    import eag_migrator.dashboard.app as dashmod
+
+    dashmod._BROWSER_CACHE.clear()
+    monkeypatch.setattr(
+        dashmod,
+        "browser_state",
+        lambda: {
+            "available": False,
+            "reason": "the image was built without Chromium",
+            "hint": "make build-browser",
+        },
+    )
+    page = TestClient(dashmod.create_app()).get("/").text
+
+    assert "No browser in this image" in page
+    assert "make build-browser" in page
+    assert "disabled" in page
+    # The cookie route needs no browser, so it stays offered.
+    assert "Cookie header" in page
+    dashmod._BROWSER_CACHE.clear()
+
+
+def test_the_hint_matches_where_it_is_running(monkeypatch):
+    from eag_migrator.web import capture as cap
+
+    monkeypatch.setattr(cap, "in_container", lambda: True)
+    assert "make build-browser" in cap.install_hint()
+    assert "docker compose" in cap.install_hint()
+
+    monkeypatch.setattr(cap, "in_container", lambda: False)
+    assert "playwright install chromium" in cap.install_hint()
+    assert "docker compose" not in cap.install_hint()
+
+
+def test_browser_status_explains_itself_when_missing(monkeypatch):
+    from eag_migrator.web import capture as cap
+
+    monkeypatch.setattr(cap, "find_chromium", lambda: None)
+
+    def explode(*_a, **_kw):
+        raise RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/…")
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", explode)
+    status = cap.browser_status()
+
+    assert status["available"] is False
+    assert "Executable doesn't exist" in status["reason"]
+    assert status["hint"]

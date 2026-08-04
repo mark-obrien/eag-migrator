@@ -87,8 +87,16 @@
         <input type="text" name="login_url" value="/login">
         <label>A CSS selector only present once signed in (recommended)</label>
         <input type="text" name="success_selector" placeholder=".dashboard, #app, nav.main">
-        <div class="actions"><button class="primary">Sign in</button></div>
+        <div class="actions">
+          <button class="primary" {% if not s.browser.available %}disabled
+            title="this image has no browser — paste a Cookie header instead"{% endif %}>
+            Sign in</button>
+        </div>
       </form>
+      {% if not s.browser.available %}
+        <div class="note">This image has no browser, so signing in for you is
+          unavailable. Use the Cookie header below instead — it needs no browser.</div>
+      {% endif %}
       <p class="muted" style="margin-top:8px">
         The password fills the form and is then dropped — only the resulting
         cookies and auth headers are stored. Needs Chromium in the image
@@ -121,8 +129,16 @@
       <div class="actions"><button>Recon</button></div>
     </form>
 
+    {% if not s.browser.available %}
+      <div class="note" style="margin-top:12px">
+        <strong>No browser in this image.</strong> Capture and “sign in for me”
+        both need one — {{ s.browser.reason }}.
+        <pre style="margin-top:6px;white-space:pre-wrap">{{ s.browser.hint }}</pre>
+      </div>
+    {% endif %}
+
     <form method="post" action="/actions/capture{{ q }}" style="margin-top:14px">
-      <label>2 — Capture: record the API it calls (needs Chromium)</label>
+      <label>2 — Capture: record the API it calls</label>
       <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
       <label>Pages to drive, one per line</label>
       <textarea name="paths" rows="3">/customers
@@ -134,7 +150,10 @@
       </label>
       <div class="muted">Never follows anything that reads as a state change —
         delete, refund, send, archive, log out — and says what it left alone.</div>
-      <div class="actions"><button>Capture</button></div>
+      <div class="actions">
+        <button {% if not s.browser.available %}disabled
+          title="this image has no browser — see the note above"{% endif %}>Capture</button>
+      </div>
     </form>
 
     <form method="post" action="/actions/harvest{{ q }}" style="margin-top:14px">

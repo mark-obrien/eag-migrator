@@ -20,8 +20,9 @@ services:
     build:
       context: .
       args:
-        # true also installs Chromium, needed only by `eagm capture`.
-        WITH_BROWSER: "${WITH_BROWSER:-false}"
+        # Chromium, for `eagm capture` and `eagm login --form`. Set
+        # WITH_BROWSER=false to build a smaller, database-only image.
+        WITH_BROWSER: "${WITH_BROWSER:-true}"
     # Optional so a missing .env fails with `eagm doctor` telling you exactly
     # what to set, rather than a cryptic compose stat error. `make setup`
     # creates it for you.
@@ -48,7 +49,7 @@ services:
     build:
       context: .
       args:
-        WITH_BROWSER: "${WITH_BROWSER:-false}"
+        WITH_BROWSER: "${WITH_BROWSER:-true}"
     env_file:
       - path: .env
         required: false

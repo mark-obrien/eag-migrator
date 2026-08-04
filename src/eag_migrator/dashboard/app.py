@@ -218,6 +218,18 @@ def _harvest_status() -> dict[str, Any]:
     }
 
 
+_BROWSER_CACHE: dict[str, Any] = {}
+
+
+def browser_state() -> dict[str, Any]:
+    """Cached: launching a browser to test costs a second, and this is polled."""
+    if not _BROWSER_CACHE:
+        from ..web.capture import browser_status
+
+        _BROWSER_CACHE.update(browser_status())
+    return _BROWSER_CACHE
+
+
 def build_status() -> dict[str, Any]:
     ensure_dirs()
     settings = load_settings()
@@ -270,6 +282,7 @@ def build_status() -> dict[str, Any]:
             for j in recent
         ],
         "api_sink": bool(settings.v3_api_base_url),
+        "browser": browser_state(),
     }
 
 

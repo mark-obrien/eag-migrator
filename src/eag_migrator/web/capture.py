@@ -65,6 +65,59 @@ class BrowserUnavailable(RuntimeError):
     """Playwright or its Chromium binary is not installed."""
 
 
+def in_container() -> bool:
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        return "docker" in Path("/proc/1/cgroup").read_text()
+    except OSError:
+        return False
+
+
+def install_hint() -> str:
+    """How to fix a missing browser, phrased for wherever this is running."""
+    if in_container():
+        return (
+            "This image was built without Chromium. Rebuild and restart:\n"
+            "  make build-browser\n"
+            "or:\n"
+            "  WITH_BROWSER=true docker compose build\n"
+            "  docker compose up -d --force-recreate dashboard"
+        )
+    return (
+        "Install the browser:  playwright install chromium\n"
+        "or point EAGM_CHROMIUM_PATH at an existing Chrome/Chromium binary."
+    )
+
+
+def browser_status() -> dict[str, Any]:
+    """Is a usable browser present? Checked before offering the buttons that need one."""
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        return {
+            "available": False,
+            "reason": "the playwright package is not installed",
+            "hint": install_hint(),
+        }
+
+    found = find_chromium()
+    if found:
+        return {"available": True, "path": str(found), "reason": "", "hint": ""}
+
+    # Playwright is installed but pins a build that may not be present. Ask it.
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+            browser.close()
+        return {"available": True, "path": "playwright default", "reason": "", "hint": ""}
+    except Exception as exc:  # noqa: BLE001
+        first = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+        return {"available": False, "reason": first[:200], "hint": install_hint()}
+
+
 def find_chromium() -> Path | None:
     """Locate a usable Chromium, ignoring Playwright's pinned build number.
 
@@ -303,9 +356,7 @@ def capture(
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - depends on install shape
         raise BrowserUnavailable(
-            "playwright is not installed. Rebuild the image with "
-            "`docker compose build --build-arg WITH_BROWSER=true`, or "
-            "`pip install playwright && playwright install chromium` locally."
+            f"playwright is not installed.\n\n{install_hint()}"
         ) from exc
 
     report = CaptureReport(
@@ -325,10 +376,9 @@ def capture(
             found = find_chromium()
             if not found:
                 raise BrowserUnavailable(
-                    f"could not launch Chromium: {first_error}\n"
-                    "Rebuild the image with `--build-arg WITH_BROWSER=true`, run "
-                    "`playwright install chromium`, or point EAGM_CHROMIUM_PATH at "
-                    "an existing Chrome/Chromium binary."
+                    f"could not launch Chromium: "
+                    f"{str(first_error).strip().splitlines()[0]}\n\n"
+                    f"{install_hint()}"
                 ) from first_error
             try:
                 browser = pw.chromium.launch(

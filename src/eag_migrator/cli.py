@@ -103,6 +103,19 @@ def doctor() -> None:
     if settings.v3_api_base_url:
         console.print(f"[dim]v3 API configured: {settings.v3_api_base_url}[/dim]")
 
+    from .web.capture import browser_status
+
+    browser = browser_status()
+    if browser["available"]:
+        console.print(f"[green]✓[/green] browser: {browser['path']}")
+    else:
+        console.print(f"[yellow]![/yellow] browser: {browser['reason']}")
+        for line in browser["hint"].splitlines():
+            console.print(f"    [dim]{line}[/dim]")
+        console.print(
+            "    [dim]Only `capture` and `login --form` need it.[/dim]"
+        )
+
     console.print(f"[dim]state db: {STATE_DB}[/dim]")
     console.print(f"[dim]mapping:  {DEFAULT_MAPPING} "
                   f"({'present' if DEFAULT_MAPPING.exists() else 'not created yet'})[/dim]")

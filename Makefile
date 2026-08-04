@@ -18,8 +18,12 @@ setup: .env ## Create .env from .env.example if it does not exist
 	@echo "Created .env from .env.example — edit it with your real connection details."
 
 .PHONY: build
-build: setup ## Build the migrator image
+build: setup ## Build the image (includes Chromium for capture/login)
 	$(COMPOSE) build
+
+.PHONY: build-slim
+build-slim: setup ## Build without Chromium — database-to-database only
+	WITH_BROWSER=false $(COMPOSE) build
 
 .PHONY: up
 up: setup ## Start the databases named in COMPOSE_PROFILES (see .env)
@@ -80,13 +84,15 @@ login: ## Store a session:  EAGM_COOKIE='sid=...' make login URL=https://...
 		--entrypoint eagm migrator login $(URL)
 
 .PHONY: capture
-capture: ## Record the site's network calls (needs WITH_BROWSER=true at build)
+capture: ## Record the site's network calls (needs the browser in the image)
 	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
 	$(RUN) capture $(URL)
 
 .PHONY: build-browser
-build-browser: setup ## Rebuild the image with Chromium, for `make capture`
+build-browser: setup ## Rebuild with Chromium and restart the dashboard
 	WITH_BROWSER=true $(COMPOSE) build
+	@$(COMPOSE) ps --services --filter status=running | grep -qx dashboard \
+		&& $(COMPOSE) up -d --force-recreate dashboard || true
 
 .PHONY: harvest
 harvest: ## Pull the site into state/staging.sqlite

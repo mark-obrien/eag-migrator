@@ -168,7 +168,7 @@ Those are already paginated, already typed, and already scoped to the account.
 Everything runs in the container — `make` wraps `docker compose run`:
 
 ```bash
-make build-browser        # image + Chromium (capture needs a real browser)
+make build                # includes Chromium, which capture and sign-in need
 
 # 1. Sign in with your own browser, copy the Cookie header from devtools.
 #    Passing it via the environment keeps it out of `ps` and shell history.
@@ -306,15 +306,20 @@ count and a sample, and writes a HAR you can open in devtools.
 
 This is usually how you find the good data on a site that looks unscrapeable.
 
-Chromium is not in the image by default (it adds several hundred MB):
+Chromium ships in the image by default, because reading v2 over HTTP is the
+primary path here and both capture and "sign in for me" need a real browser.
+`eagm doctor` and the dashboard both report whether it is present, so a missing
+browser shows up before you start a job rather than part-way through one.
+
+If you only ever migrate database-to-database, `make build-slim` leaves it out
+and saves a few hundred MB. To add it back later:
 
 ```bash
-make build-browser        # or: docker compose build --build-arg WITH_BROWSER=true
-make capture URL=https://the-v2-site.example
+make build-browser        # rebuilds and restarts the dashboard
 ```
 
 If you already have Chrome or Chromium somewhere, point `EAGM_CHROMIUM_PATH` at
-it and skip the rebuild.
+it instead.
 
 ### Being a good citizen
 
@@ -602,7 +607,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-151 tests, in five groups:
+157 tests, in five groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like

@@ -21,9 +21,11 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 RUN pip install --no-deps -e .
 
-# `eagm capture` drives a real browser. Chromium adds several hundred MB, so it
-# is opt-in: docker compose build --build-arg WITH_BROWSER=true
-ARG WITH_BROWSER=false
+# `eagm capture` and `eagm login --form` drive a real browser, and reading v2
+# over HTTP is the primary path here, so Chromium is included by default.
+# It adds several hundred MB; if you only ever migrate database-to-database,
+# build with --build-arg WITH_BROWSER=false (or `make build-slim`).
+ARG WITH_BROWSER=true
 RUN if [ "$WITH_BROWSER" = "true" ]; then \
         playwright install --with-deps chromium; \
     fi
