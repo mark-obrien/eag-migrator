@@ -470,3 +470,129 @@ def test_form_login_accepts_credentials_directly_or_from_env(monkeypatch):
     params = inspect.signature(form_login).parameters
     assert "username" in params and "password" in params
     assert params["username"].default is None
+
+
+# --- the live log -----------------------------------------------------------
+
+
+def test_the_log_survives_the_job_ending(client, workspace):
+    """The moment a job finishes is exactly when you want to read its log."""
+    import eag_migrator.dashboard.app as dashmod
+
+    job = dashmod.jobs.start("demo", "a thing", lambda j: j.say("did the thing"))
+    _wait(job)
+
+    status = client.get("/api/status").json()
+    assert status["job"] is None                      # nothing running
+    assert status["last_job"]["label"] == "a thing"   # but still reportable
+    assert any("did the thing" in line for line in status["last_job"]["log"])
+
+    page = client.get("/").text
+    assert "did the thing" in page                    # rendered, not hidden
+
+
+def test_logs_are_written_to_disk_as_they_happen(workspace, monkeypatch):
+    """A crash mid-run must leave the log behind, not lose it with the process."""
+    import eag_migrator.dashboard.app as dashmod
+    from eag_migrator.dashboard.jobs import JobManager
+
+    manager = JobManager(log_dir=workspace / "joblogs")
+    monkeypatch.setattr(dashmod, "jobs", manager)
+
+    started = threading_event()
+
+    def slow(job):
+        job.say("first line")
+        started.set()
+        while not job.should_stop():
+            time.sleep(0.01)
+        return {}
+
+    job = manager.start("slow", "slow thing", slow)
+    started.wait(5)
+
+    # Readable while it is still running.
+    assert job.log_path.exists()
+    assert "first line" in job.log_path.read_text()
+
+    job.stop()
+    _wait(job)
+    assert "finished" in job.log_path.read_text()
+
+
+def threading_event():
+    import threading
+
+    return threading.Event()
+
+
+def test_tail_returns_only_what_is_new():
+    from eag_migrator.dashboard.jobs import Job
+
+    job = Job(id="x", kind="k", label="l")
+    for i in range(5):
+        job.say(f"line {i}")
+
+    lines, offset = job.tail(0)
+    assert len(lines) == 5 and offset == 5
+
+    fresh, offset = job.tail(offset)
+    assert fresh == [] and offset == 5
+
+    job.say("line 5")
+    fresh, offset = job.tail(5)
+    assert len(fresh) == 1 and "line 5" in fresh[0] and offset == 6
+
+
+def test_tail_copes_with_a_trimmed_log():
+    """The in-memory tail is bounded; offsets must still line up."""
+    from eag_migrator.dashboard.jobs import Job
+
+    job = Job(id="x", kind="k", label="l")
+    for i in range(2500):
+        job.say(f"line {i}")
+
+    assert job.dropped == 500
+    assert len(job.log) == 2000
+
+    lines, offset = job.tail(0)          # asking for everything
+    assert offset == 2500
+    assert "line 2499" in lines[-1]
+
+    lines, offset = job.tail(2499)       # asking for just the last one
+    assert len(lines) == 1
+
+
+def test_log_stream_pushes_lines_and_closes_on_completion(client, workspace):
+    import eag_migrator.dashboard.app as dashmod
+
+    job = dashmod.jobs.start(
+        "demo", "streamed", lambda j: [j.say(f"step {i}") for i in range(3)] and {}
+    )
+    _wait(job)
+
+    with client.stream("GET", f"/api/jobs/{job.id}/stream?since=0") as res:
+        assert res.status_code == 200
+        assert "text/event-stream" in res.headers["content-type"]
+        body = "".join(res.iter_text())
+
+    assert "event: log" in body
+    assert "step 0" in body and "step 2" in body
+    assert "event: end" in body          # the stream ends itself
+    assert '"status": "done"' in body
+
+
+def test_activity_page_lists_past_jobs_with_their_logs(client, workspace):
+    import eag_migrator.dashboard.app as dashmod
+
+    first = dashmod.jobs.start("demo", "earlier job", lambda j: j.say("older output"))
+    _wait(first)
+    second = dashmod.jobs.start("demo", "later job", lambda j: j.say("newer output"))
+    _wait(second)
+
+    page = client.get("/jobs").text
+    assert "earlier job" in page and "later job" in page
+    assert "newer output" in page                    # newest selected by default
+
+    older = client.get(f"/jobs?job={first.id}").text
+    assert "older output" in older

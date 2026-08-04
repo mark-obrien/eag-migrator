@@ -10,17 +10,19 @@
 {% endif %}
 
 <!-- Running job ---------------------------------------------------------- -->
-<div id="job-panel" class="card wide" style="{% if not s.job %}display:none{% endif %}">
-  <div style="display:flex;align-items:center;gap:12px">
-    <h2 style="margin:0">Running: <span id="job-label"></span></h2>
-    <span id="job-status" class="pill"></span>
-    <button id="job-stop" class="danger" style="margin-left:auto">Stop</button>
+<div id="job-panel" class="card wide" style="{% if not s.last_job %}display:none{% endif %}">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <h2 style="margin:0"><span id="job-label">{{ s.last_job.label if s.last_job }}</span></h2>
+    <span id="job-status" class="pill">{{ s.last_job.status if s.last_job }}</span>
+    <a href="/jobs{{ q }}" class="muted" style="font-size:13px">full history →</a>
+    <button id="job-stop" class="danger" style="margin-left:auto"
+            {% if not s.job %}disabled{% endif %}>Stop</button>
   </div>
   <p class="muted" style="margin:6px 0 10px">
-    Stopping finishes the current batch first, so progress stays checkpointed
-    and the run can be resumed.
+    Live. Stopping finishes the current batch first, so progress stays
+    checkpointed and the run can be resumed.
   </p>
-  <div class="log" id="job-log"></div>
+  <div class="log" id="job-log">{{ s.last_job.log | join('\n') if s.last_job }}</div>
 </div>
 
 <div class="grid">
@@ -303,8 +305,8 @@
 
 <script>
 const TOKEN = {{ (token or "") | tojson }};
-const qs = TOKEN ? ("?token=" + encodeURIComponent(TOKEN)) : "";
-let activeJob = {{ (status.job.id if status.job else None) | tojson }};
+const tokenParam = TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : "";
+const qs = TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : "";
 
 const panel = document.getElementById("job-panel");
 const logEl = document.getElementById("job-log");
@@ -312,48 +314,96 @@ const labelEl = document.getElementById("job-label");
 const statusEl = document.getElementById("job-status");
 const stopBtn = document.getElementById("job-stop");
 
+let activeJob = {{ (status.job.id if status.job else None) | tojson }};
+let offset = {{ (status.last_job.log_offset if status.last_job else 0) | tojson }};
+let stream = null;
+
+const CLASS = {running: "", done: "ok", failed: "bad", stopped: "warn"};
+function setStatus(text) {
+  statusEl.textContent = text;
+  statusEl.className = "pill " + (CLASS[text] || "");
+}
+setStatus(statusEl.textContent.trim() || "idle");
+
 stopBtn.addEventListener("click", async () => {
   if (!activeJob) return;
   stopBtn.disabled = true;
-  await fetch(`/api/jobs/${activeJob}/stop${qs}`, {method: "POST"});
+  setStatus("stopping");
+  try {
+    const res = await fetch(`/api/jobs/${activeJob}/stop${qs}`, {method: "POST"});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    // Leaving the button disabled after a failed stop would be worse than
+    // the failure: it would look like the request went through.
+    setStatus("running");
+    stopBtn.disabled = false;
+    alert(`Could not stop the job: ${err.message}. The job is still running.`);
+  }
 });
 
-function render(job) {
-  panel.style.display = "";
-  labelEl.textContent = job.label;
-  statusEl.textContent = job.stopping ? "stopping" : job.status;
-  statusEl.className = "pill " + ({running: "", done: "ok", failed: "bad",
-                                   stopped: "warn"}[job.status] || "");
+function append(lines) {
   const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
-  logEl.textContent = job.log.join("\n");
+  logEl.textContent += (logEl.textContent ? "\n" : "") + lines.join("\n");
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
-  stopBtn.disabled = job.status !== "running" || job.stopping;
 }
 
-async function poll() {
-  try {
-    if (activeJob) {
-      const res = await fetch(`/api/jobs/${activeJob}${qs}`);
-      if (res.ok) {
-        const job = await res.json();
-        render(job);
-        if (job.status !== "running") {
-          activeJob = null;
-          // Let the last lines land, then refresh so every panel is current.
-          setTimeout(() => location.reload(), 1200);
-          return;
-        }
-      }
-    } else {
-      const res = await fetch(`/api/status${qs}`);
-      if (res.ok) {
-        const st = await res.json();
-        if (st.job) { activeJob = st.job.id; render(st.job); }
-      }
-    }
-  } catch (e) { /* the server may be restarting; try again next tick */ }
-  setTimeout(poll, activeJob ? 1000 : 4000);
+// Server-sent events: each line arrives as it is written, rather than the whole
+// log being re-fetched on a timer.
+function follow(jobId, from) {
+  if (stream) stream.close();
+  activeJob = jobId;
+  offset = from;
+  panel.style.display = "";
+  stopBtn.disabled = false;
+  setStatus("running");
+
+  stream = new EventSource(`/api/jobs/${jobId}/stream?since=${from}${tokenParam}`);
+  stream.addEventListener("log", e => {
+    const data = JSON.parse(e.data);
+    append(data.lines);
+    offset = data.offset;
+  });
+  stream.addEventListener("end", e => {
+    stream.close();
+    stream = null;
+    activeJob = null;
+    setStatus(JSON.parse(e.data).status);
+    stopBtn.disabled = true;
+    // Refresh the panels around the log, but leave the log itself on screen.
+    refreshStatus();
+    watch();
+  });
+  stream.onerror = () => { stream.close(); stream = null; setTimeout(watch, 2000); };
 }
-poll();
+
+// The surrounding cards go stale once a job changes something; re-render them
+// without touching the log the user is reading.
+async function refreshStatus() {
+  try {
+    const res = await fetch(`/api/status${qs}`);
+    if (!res.ok) return;
+    const fresh = await res.text();
+    const doc = new DOMParser().parseFromString(
+      await (await fetch(`/${qs}`)).text(), "text/html");
+    const next = doc.querySelector(".grid");
+    const here = document.querySelector(".grid");
+    if (next && here) here.replaceWith(next);
+  } catch (e) { /* leave the page as it is */ }
+}
+
+// Idle: watch for a job started from another tab.
+async function watch() {
+  if (activeJob) return;
+  try {
+    const res = await fetch(`/api/status${qs}`);
+    if (res.ok) {
+      const st = await res.json();
+      if (st.job) { logEl.textContent = ""; follow(st.job.id, 0); return; }
+    }
+  } catch (e) { /* try again */ }
+  setTimeout(watch, 4000);
+}
+
+if (activeJob) follow(activeJob, offset); else watch();
 </script>
 {% endblock %}

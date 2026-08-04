@@ -51,7 +51,8 @@ STAGING_DB = STATE_DIR / "staging.sqlite"
 SESSION_FILE = STATE_DIR / "session.json"
 WEB_CACHE = STATE_DIR / "webcache"
 
-jobs = JobManager()
+JOB_LOGS = REPORTS_DIR / "jobs"
+jobs = JobManager(log_dir=JOB_LOGS)
 
 
 # --- auth -------------------------------------------------------------------
@@ -250,6 +251,10 @@ def build_status() -> dict[str, Any]:
                 )
 
     current = jobs.current
+    recent = jobs.recent(8)
+    # The last job whether or not it is still running: without this the log
+    # vanishes the moment a job ends, which is exactly when you want to read it.
+    last = current or (recent[0] if recent else None)
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "databases": sides,
@@ -259,8 +264,10 @@ def build_status() -> dict[str, Any]:
         "staging": _staging_status(),
         "runs": runs,
         "job": current.to_dict() if current else None,
+        "last_job": last.to_dict() if last else None,
         "recent_jobs": [
-            {"id": j.id, "label": j.label, "status": j.status} for j in jobs.recent(8)
+            {"id": j.id, "label": j.label, "status": j.status, "kind": j.kind}
+            for j in recent
         ],
         "api_sink": bool(settings.v3_api_base_url),
     }
@@ -381,6 +388,17 @@ def create_app() -> FastAPI:
             request, "staging.html", staging=status, table=table, rows=rows, columns=columns
         )
 
+    @app.get("/jobs", response_class=HTMLResponse, dependencies=[Depends(require_token)])
+    def jobs_index(request: Request, job: str | None = Query(None)) -> HTMLResponse:
+        recent = jobs.recent(25)
+        chosen = jobs.get(job) if job else (recent[0] if recent else None)
+        return page(
+            request,
+            "jobs.html",
+            recent=[j.to_dict() for j in recent],
+            job=chosen.to_dict() if chosen else None,
+        )
+
     @app.get("/reports", response_class=HTMLResponse, dependencies=[Depends(require_token)])
     def reports_index(request: Request) -> HTMLResponse:
         files = []
@@ -428,6 +446,48 @@ def create_app() -> FastAPI:
         if not job:
             raise HTTPException(404, "no such job")
         return JSONResponse(job.to_dict())
+
+    @app.get("/api/jobs/{job_id}/stream", dependencies=[Depends(require_token)])
+    async def api_job_stream(job_id: str, since: int = Query(0)) -> Any:
+        """Server-sent events: push each log line as it happens.
+
+        Polling worked but lagged a second behind and re-sent the whole log
+        each time. This pushes only what is new, and keeps streaming until the
+        job ends so the browser sees the final status without another request.
+        """
+        import asyncio
+
+        from fastapi.responses import StreamingResponse
+
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "no such job")
+
+        async def events() -> Any:
+            offset = since
+            while True:
+                lines, offset = job.tail(offset)
+                if lines:
+                    payload = json.dumps({"lines": lines, "offset": offset})
+                    yield f"event: log\ndata: {payload}\n\n"
+                if not job.active:
+                    done = json.dumps(
+                        {
+                            "status": job.status,
+                            "error": job.error,
+                            "result": job.result,
+                            "finished_at": job.finished_at,
+                        }
+                    )
+                    yield f"event: end\ndata: {done}\n\n"
+                    return
+                await asyncio.sleep(0.25)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(require_token)])
     def api_stop(job_id: str) -> JSONResponse:
@@ -770,8 +830,9 @@ def create_app() -> FastAPI:
             config = load_config(HARVEST_FILE)
             session = Session.load(SESSION_FILE) if SESSION_FILE.exists() else None
 
-            def say(name: str, done: int, total: int) -> None:
-                job.say(f"{name}: {done:,}/{total:,}")
+            def say(name: str, done: int, total: int, note: str = "") -> None:
+                where = f"{done:,}/{total:,}" if total else f"{done:,}"
+                job.say(f"{name}: {where}{'  ' + note if note else ''}")
 
             with Staging(STAGING_DB) as staging:
                 report = harvest(

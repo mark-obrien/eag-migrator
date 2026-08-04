@@ -878,8 +878,9 @@ def harvest(
         + ("" if config.site.respect_robots else " [yellow](ignoring robots.txt)[/yellow]")
     )
 
-    def say(name: str, done: int, total: int) -> None:
-        console.print(f"[dim]  {name}: {done:,}/{total:,}[/dim]")
+    def say(name: str, done: int, total: int, note: str = "") -> None:
+        where = f"{done:,}/{total:,}" if total else f"{done:,}"
+        console.print(f"[dim]  {name}: {where}{'  ' + note if note else ''}[/dim]")
 
     try:
         with Staging(STAGING_DB) as staging:

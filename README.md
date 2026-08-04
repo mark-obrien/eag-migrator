@@ -63,9 +63,27 @@ mapping and its unanswered TODOs, what is in staging, and every run. The
 buttons run the same code the CLI does — there is no second implementation, so
 the UI cannot drift from `eagm`.
 
-Long jobs (harvest, plan, run) stream their log live and have a **Stop**
-button. Stopping waits for the current batch to finish, so progress stays
-checkpointed and the run resumes cleanly.
+### Watching it work
+
+Long jobs stream their log line by line over server-sent events — each API
+page as it is fetched, each URL as it is crawled, each entity as it migrates —
+so you can see what it is doing rather than waiting for a total at the end:
+
+```
+13:54:25  started: Harvest v2
+13:54:25  customers: 2  page 1: 2 record(s)
+13:54:26  customers: 4  page 2: 2 record(s)
+13:54:26  customers: 5/5
+13:54:27  quotes: 2  page 1: 2 record(s)
+```
+
+The log **stays on screen after the job ends** — that is exactly when you want
+to read it — and every run is kept under **Activity**, so you can go back to
+what a harvest did last week. Logs are also written to `reports/jobs/` as they
+happen, so they survive a crash or a restart and can be grepped.
+
+Long jobs also have a **Stop** button. Stopping waits for the current batch to
+finish, so progress stays checkpointed and the run resumes cleanly.
 
 A few deliberate constraints:
 
@@ -584,7 +602,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-147 tests, in five groups:
+151 tests, in five groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -606,8 +624,10 @@ make test-local    # on the host
   an explore pass over a fixture app whose navigation contains Delete, Refund,
   Email and Log out links, asserting it finds every real screen and touches
   none of those. Skipped automatically when no browser is available.
-- **The dashboard** — weighted towards what would actually hurt: that a
-  supplied password never reaches the session file, the job log or a page,
+- **The dashboard** — the live log (streaming, surviving completion, written
+  to disk, and offsets that stay correct once the in-memory tail is trimmed),
+  plus what would actually hurt: that a supplied password never reaches the
+  session file, the job log or a page,
   that session values never reach the HTML or the JSON API, that database
   passwords are stripped, that a migration cannot start without its confirmation word, that
   a crafted URL cannot read outside `reports/`, that the token gate holds, and
@@ -629,6 +649,7 @@ state/migration.sqlite     checkpoints, id map, rollback journal (gitignored)
 state/staging.sqlite       harvested site content (gitignored)
 state/webcache/            cached HTTP responses (gitignored)
 state/session.json         v2 app credentials, mode 0600 (gitignored)
+reports/jobs/              per-run job logs, written live (gitignored)
 db/v2-seed/, db/v3-seed/   drop .sql dumps here (gitignored)
 src/eag_migrator/
   dashboard/               the web UI (FastAPI + server-rendered templates)

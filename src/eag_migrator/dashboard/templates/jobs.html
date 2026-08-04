@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block nav_jobs %}on{% endblock %}
+{% block content %}
+<h2>Activity</h2>
+{% if not recent %}
+  <p class="muted">Nothing has run yet.</p>
+{% else %}
+<div class="grid" style="grid-template-columns: 260px 1fr">
+  <div class="card">
+    <h3 style="margin-top:0">Recent</h3>
+    {% for j in recent %}
+      <div class="row">
+        <a href="/jobs?job={{ j.id }}{% if token %}&token={{ token }}{% endif %}"
+           style="{% if job and j.id == job.id %}font-weight:600{% endif %}">
+          {{ j.label }}
+        </a>
+        <span class="{{ {'done':'ok','failed':'bad','stopped':'warn'}.get(j.status,'') }}">
+          {{ j.status }}
+        </span>
+      </div>
+      <div class="muted mono" style="font-size:11.5px">{{ j.started_at[11:19] }}</div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    {% if job %}
+      <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+        <h3 style="margin:0">{{ job.label }}</h3>
+        <span class="pill {{ {'done':'ok','failed':'bad','stopped':'warn'}.get(job.status,'') }}">
+          {{ job.status }}
+        </span>
+        <span class="muted mono">{{ job.id }}</span>
+      </div>
+      {% if job.error %}<div class="flash err" style="margin-top:10px">{{ job.error }}</div>{% endif %}
+      {% if job.dropped %}
+        <div class="note" style="margin-top:8px">
+          First {{ job.dropped }} line(s) trimmed from this view — the full log is at
+          <span class="mono">{{ job.log_path }}</span>
+        </div>
+      {% endif %}
+      <div class="log" id="log" style="margin-top:12px;max-height:64vh">{{ job.log | join('\n') }}</div>
+      {% if job.result %}
+        <h3>Result</h3>
+        <pre>{{ job.result | tojson(indent=2) }}</pre>
+      {% endif %}
+    {% else %}
+      <p class="muted">Pick a job on the left.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<script>
+// Keep streaming if the job selected here is still going.
+const JOB = {{ (job.id if job and job.status == 'running' else None) | tojson }};
+const OFFSET = {{ (job.log_offset if job else 0) | tojson }};
+const TOKEN = {{ (token or "") | tojson }};
+if (JOB) {
+  const qs = TOKEN ? `?since=${OFFSET}&token=${encodeURIComponent(TOKEN)}` : `?since=${OFFSET}`;
+  const el = document.getElementById("log");
+  const src = new EventSource(`/api/jobs/${JOB}/stream${qs}`);
+  src.addEventListener("log", e => {
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+    el.textContent += "\n" + JSON.parse(e.data).lines.join("\n");
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  });
+  src.addEventListener("end", () => { src.close(); location.reload(); });
+  // EventSource reconnects on its own; give up after the job is likely gone
+  // rather than retrying against a dead server forever.
+  let failures = 0;
+  src.onerror = () => { if (++failures > 5) src.close(); };
+}
+</script>
+{% endblock %}

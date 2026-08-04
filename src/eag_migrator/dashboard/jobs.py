@@ -16,6 +16,7 @@ import threading
 import traceback
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -30,7 +31,12 @@ class Job:
     log: list[str] = field(default_factory=list)
     result: dict[str, Any] | None = None
     error: str | None = None
+    log_path: Path | None = None
+    """Where the full log is written, so it survives a restart and a trimmed tail."""
+    dropped: int = 0
+    """Lines trimmed from the in-memory tail. They are still on disk."""
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
+    _handle: Any = field(default=None, repr=False)
 
     @property
     def active(self) -> bool:
@@ -38,11 +44,36 @@ class Job:
 
     def say(self, message: str) -> None:
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%H:%M:%S")
-        self.log.append(f"{stamp}  {message}")
+        line = f"{stamp}  {message}"
+        self.log.append(line)
+
+        # Written through immediately, so the log is complete on disk even if
+        # the process dies mid-run — which is exactly when you want to read it.
+        if self._handle is not None:
+            try:
+                self._handle.write(line + "\n")
+                self._handle.flush()
+            except Exception:  # noqa: BLE001 - logging must never break the job
+                pass
+
         # A runaway job must not eat memory; keep the tail, which is what
-        # anyone watching actually cares about.
+        # anyone watching cares about. The rest is on disk.
         if len(self.log) > 2000:
-            del self.log[: len(self.log) - 2000]
+            excess = len(self.log) - 2000
+            del self.log[:excess]
+            self.dropped += excess
+
+    def tail(self, since: int = 0) -> tuple[list[str], int]:
+        """Lines added since a given offset, plus the new offset.
+
+        Lets a live view fetch only what is new instead of the whole log each
+        second.
+        """
+        total = self.dropped + len(self.log)
+        if since >= total:
+            return [], total
+        start = max(since - self.dropped, 0)
+        return self.log[start:], total
 
     def stop(self) -> None:
         self._stop.set()
@@ -60,8 +91,11 @@ class Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "log": self.log,
+            "log_offset": self.dropped + len(self.log),
+            "dropped": self.dropped,
             "result": self.result,
             "error": self.error,
+            "log_path": str(self.log_path) if self.log_path else None,
             "stopping": self._stop.is_set() and self.status == "running",
         }
 
@@ -71,12 +105,15 @@ class JobBusy(RuntimeError):
 
 
 class JobManager:
-    def __init__(self, history: int = 40) -> None:
+    def __init__(self, history: int = 40, log_dir: Path | None = None) -> None:
         self._jobs: dict[str, Job] = {}
         self._order: list[str] = []
         self._current: str | None = None
         self._lock = threading.Lock()
         self._history = history
+        self.log_dir = log_dir
+        if log_dir:
+            log_dir.mkdir(parents=True, exist_ok=True)
 
     # --- queries ------------------------------------------------------------
 
@@ -109,12 +146,19 @@ class JobManager:
                     f"'{active.label}' is still running. Wait for it, or stop it first."
                 )
 
+            started = dt.datetime.now(dt.timezone.utc)
             job = Job(
-                id=uuid.uuid4().hex[:12],
+                id=f"{started:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}",
                 kind=kind,
                 label=label,
-                started_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                started_at=started.isoformat(),
             )
+            if self.log_dir:
+                job.log_path = self.log_dir / f"{job.id}-{kind}.log"
+                try:
+                    job._handle = job.log_path.open("a", encoding="utf-8")
+                except OSError:
+                    job.log_path = None
             self._jobs[job.id] = job
             self._order.append(job.id)
             self._current = job.id
@@ -139,6 +183,12 @@ class JobManager:
                     job.say(f"  {line}")
             finally:
                 job.finished_at = dt.datetime.now(dt.timezone.utc).isoformat()
+                if job._handle is not None:
+                    try:
+                        job._handle.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    job._handle = None
 
         threading.Thread(target=runner, name=f"eagm-{kind}", daemon=True).start()
         return job

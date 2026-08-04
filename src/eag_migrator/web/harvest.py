@@ -286,7 +286,12 @@ def _crawl_urls(fetcher: Fetcher, spec: CrawlDiscovery, cap: int) -> list[str]:
     return kept
 
 
-def _api_records(fetcher: Fetcher, spec: ApiDiscovery, cap: int) -> Iterator[tuple[str, Any]]:
+def _api_records(
+    fetcher: Fetcher,
+    spec: ApiDiscovery,
+    cap: int,
+    on_page: Any = None,
+) -> Iterator[tuple[str, Any]]:
     """Page through a JSON endpoint, yielding (source_url, record).
 
     Handles the four shapes an application API realistically uses: page
@@ -352,6 +357,9 @@ def _api_records(fetcher: Fetcher, spec: ApiDiscovery, cap: int) -> Iterator[tup
             records = [records]
         if not isinstance(records, list) or not records:
             return
+
+        if on_page:
+            on_page(index + 1, len(records), resp.url, resp.from_cache)
 
         for record in records:
             yield resp.url, record
@@ -452,7 +460,15 @@ def _harvest_collection(
 
     # --- JSON API: no HTML parsing at all ----------------------------------
     if disc.api:
-        for source_url, record in _api_records(fetcher, disc.api, cap):
+        def page_note(page: int, count: int, url: str, cached: bool) -> None:
+            say(
+                collection.name,
+                result.fetched + count,
+                0,
+                f"page {page}: {count} record(s)" + (" (cached)" if cached else ""),
+            )
+
+        for source_url, record in _api_records(fetcher, disc.api, cap, page_note):
             result.discovered += 1
             result.fetched += 1
             try:
@@ -492,6 +508,7 @@ def _harvest_collection(
     result.discovered = len(urls)
 
     for i, url in enumerate(urls, 1):
+        say(collection.name, i, len(urls), url)
         resp = fetcher.get(url)
         if resp.from_cache:
             result.from_cache += 1
@@ -518,8 +535,6 @@ def _harvest_collection(
         rows.append(_finalise(extracted, collection, url, result.scrubbed))
         if len(result.samples) < 3:
             result.samples.append(dict(rows[-1]))
-        if i % 25 == 0:
-            say(collection.name, i, len(urls))
 
     say(collection.name, result.fetched, result.discovered)
     result.stored = staging.insert(collection.name, columns, rows)
