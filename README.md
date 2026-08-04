@@ -809,6 +809,32 @@ The created record's identifier is read from inside the envelope's `data`,
 trying `id`, `key`, `uuid`, `guid` and `_id` in turn, so a target keying on
 UUIDs works without configuration. Set `target.key` if it uses something else.
 
+### Probing the API before you migrate through it
+
+```bash
+make cli CMD="api-get /api/V1/pricing-profiles"
+make cli CMD="api-post /api/V1/customers --data '{\"name\":\"ZZ Test\"}' --yes"
+```
+
+`api-get` reads an endpoint with the credentials in `.env`. Use it to pull
+what the mapping needs before writing anything — the UUIDs behind pricing
+profiles, locations, payment terms and users, and the codes behind the
+target's enums. Read-only.
+
+`api-post` sends one record and reports exactly what happened. It creates a
+record, so it needs `--yes` and obviously fake values. Two things make it
+worth doing before a real run:
+
+- It exercises the **same client, credentials and response handling** the
+  migration uses. A 200 that actually means "rejected" shows up here rather
+  than 400 records into a migration.
+- It reveals the **payload the target expects**. A form's field names only
+  hint at that, and a React front end with no `name` attributes doesn't even
+  do that much — one real request settles it.
+
+Both write the full response to `reports/`, so the enum codes and UUIDs are
+there to copy into the mapping.
+
 ---
 
 ## Commands
@@ -829,6 +855,8 @@ UUIDs works without configuration. Set `target.key` if it uses something else.
 | `eagm plan` | Dry run |
 | `eagm run` | Migrate |
 | `eagm verify` | Post-migration verification |
+| `eagm api-get <path>` | Read an endpoint on v3's API (for UUIDs and enum codes) |
+| `eagm api-post <path> --data '{...}' --yes` | Send one record to v3 and report what came back |
 | `eagm rollback <run-id>` | Undo a run |
 | `eagm runs` | List previous runs |
 | `eagm errors <run-id>` | What went wrong, grouped by cause |
@@ -849,7 +877,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-214 tests, in seven groups:
+220 tests, in seven groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like

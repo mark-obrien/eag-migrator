@@ -103,6 +103,11 @@ build-browser: setup ## Rebuild with Chromium and restart the dashboard
 harvest: ## Pull the site into state/staging.sqlite
 	$(RUN) harvest
 
+.PHONY: api-get
+api-get: ## Read a v3 API endpoint:  make api-get PATH_=/api/V1/pricing-profiles
+	@test -n "$(PATH_)" || (echo "Set PATH_=/api/V1/..." && exit 1)
+	$(RUN) api-get $(PATH_)
+
 .PHONY: staging
 staging: ## Show what is in the staging database
 	$(RUN) staging

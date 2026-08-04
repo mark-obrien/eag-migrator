@@ -29,6 +29,27 @@ ERROR_KEYS = ("messages", "errors", "error", "message", "detail", "title")
 ID_FIELDS = ("id", "key", "uuid", "guid", "_id")
 
 
+def build_client(
+    base_url: str,
+    token: str | None = None,
+    timeout: int = 30,
+    cookie: str | None = None,
+) -> httpx.Client:
+    """One place that knows how to authenticate against the target.
+
+    Shared with `eagm api-get` / `api-post`, so probing the API exercises the
+    same credentials and headers a real run would use.
+    """
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    # Some APIs authenticate with an HttpOnly session cookie and issue no token
+    # at all, so a signed-in browser session is the only credential available.
+    if cookie:
+        headers["Cookie"] = cookie
+    return httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout)
+
+
 class ApiSink:
     def __init__(
         self,
@@ -38,15 +59,7 @@ class ApiSink:
         id_field: str | None = None,
         cookie: str | None = None,
     ) -> None:
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        # Some APIs authenticate with an HttpOnly session cookie and issue no
-        # token at all, so a signed-in browser session is the only credential
-        # available.
-        if cookie:
-            headers["Cookie"] = cookie
-        self.client = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout)
+        self.client = build_client(base_url, token, timeout, cookie)
         self.id_field = id_field
 
     def columns(self, entity: EntityMap) -> list[str]:

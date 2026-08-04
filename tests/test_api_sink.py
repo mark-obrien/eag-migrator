@@ -29,22 +29,31 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args) -> None:
         pass
 
-    def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length") or 0)
-        SEEN.append(
-            {
-                "path": self.path,
-                "body": json.loads(self.rfile.read(length) or b"{}"),
-                "cookie": self.headers.get("Cookie"),
-                "auth": self.headers.get("Authorization"),
-            }
-        )
+    def _reply(self) -> None:
         body = json.dumps(REPLY.get("body", {})).encode()
         self.send_response(REPLY.get("status", 200))
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        SEEN.append(
+            {
+                "method": "POST",
+                "path": self.path,
+                "body": json.loads(self.rfile.read(length) or b"{}"),
+                "cookie": self.headers.get("Cookie"),
+                "auth": self.headers.get("Authorization"),
+            }
+        )
+        self._reply()
+
+    def do_GET(self) -> None:  # noqa: N802
+        SEEN.append({"method": "GET", "path": self.path,
+                     "cookie": self.headers.get("Cookie")})
+        self._reply()
 
 
 @pytest.fixture
@@ -179,3 +188,97 @@ def test_the_row_is_posted_to_the_configured_endpoint(api):
 
     assert SEEN[0]["path"] == "/api/V1/customers"
     assert SEEN[0]["body"] == {"name": "Dana", "customerType": 9}
+
+
+# --- probing the target from the CLI ----------------------------------------
+#
+# `eagm api-get` / `api-post` exist so the API can be exercised before a
+# migration runs, using the same client and the same response handling. If the
+# probe says a write succeeded and the real run disagrees, the probe is
+# worthless — so these check they share the verdict.
+
+
+@pytest.fixture
+def cli(api, tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from eag_migrator import cli as cli_mod
+
+    monkeypatch.setenv("V3_API_BASE_URL", api)
+    monkeypatch.setenv("V3_API_COOKIE", "eag_session=probe")
+    monkeypatch.setattr(cli_mod, "REPORTS_DIR", tmp_path / "reports")
+    (tmp_path / "reports").mkdir()
+    return CliRunner().invoke, cli_mod.app
+
+
+def test_api_get_reads_an_endpoint_with_the_configured_credentials(cli):
+    invoke, app = cli
+    REPLY["body"] = {
+        "data": [{"key": "019f-aaaa", "profileName": "Default", "isDefault": True}],
+        "succeeded": True,
+    }
+    result = invoke(app, ["api-get", "/api/V1/pricing-profiles"])
+
+    assert result.exit_code == 0, result.output
+    assert "HTTP 200" in result.output
+    assert "1 item(s)" in result.output
+    assert "profileName" in result.output          # the keys the mapping needs
+    assert SEEN[0]["cookie"] == "eag_session=probe"
+
+
+def test_api_post_refuses_to_write_without_yes(cli):
+    invoke, app = cli
+    result = invoke(app, ["api-post", "/api/V1/customers", "--data", '{"name": "ZZ Test"}'])
+
+    assert result.exit_code == 1
+    assert "--yes" in result.output
+    assert SEEN == []                              # nothing was sent
+
+
+def test_api_post_reports_a_rejection_that_arrived_as_http_200(cli):
+    """The whole point: the probe must not call this a success either."""
+    invoke, app = cli
+    REPLY["body"] = {
+        "data": None,
+        "messages": ["Phone Number is required"],
+        "succeeded": False,
+    }
+    result = invoke(
+        app, ["api-post", "/api/V1/customers", "--data", '{"name": "ZZ Test"}', "--yes"]
+    )
+
+    assert result.exit_code == 0
+    assert "rejected" in result.output
+    assert "Phone Number is required" in result.output
+
+
+def test_api_post_reports_the_id_the_target_assigned(cli):
+    invoke, app = cli
+    REPLY["body"] = {"data": {"key": "019fca0c-2222", "customerId": "CUST-0002"},
+                     "succeeded": True}
+    result = invoke(
+        app, ["api-post", "/api/V1/customers", "--data", '{"name": "ZZ Test"}', "--yes"]
+    )
+
+    assert result.exit_code == 0
+    assert "accepted" in result.output
+    assert "019fca0c-2222" in result.output
+    assert SEEN[0]["body"] == {"name": "ZZ Test"}
+
+
+def test_bad_json_is_caught_before_anything_is_sent(cli):
+    invoke, app = cli
+    result = invoke(app, ["api-post", "/api/V1/customers", "--data", "{not json", "--yes"])
+
+    assert result.exit_code == 2
+    assert "not valid JSON" in result.output
+    assert SEEN == []
+
+
+def test_a_missing_base_url_says_what_to_set(cli, monkeypatch):
+    invoke, app = cli
+    monkeypatch.delenv("V3_API_BASE_URL")
+    result = invoke(app, ["api-get", "/api/V1/customers"])
+
+    assert result.exit_code == 2
+    assert "V3_API_BASE_URL" in result.output

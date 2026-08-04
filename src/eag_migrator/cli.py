@@ -1092,6 +1092,141 @@ def staging(
     console.print(f"\n[dim]V2_DATABASE_URL=sqlite:///{STAGING_DB}[/dim]")
 
 
+def _api_client(settings: Settings):
+    from .adapters.api_sink import build_client
+
+    if not settings.v3_api_base_url:
+        console.print(
+            "[red]V3_API_BASE_URL is not set.[/red] Put v3's base URL in .env, "
+            "plus V3_API_COOKIE (paste the Cookie header from a signed-in "
+            "browser tab) or V3_API_TOKEN."
+        )
+        raise typer.Exit(2)
+    credential = (
+        "token" if settings.v3_api_token
+        else "session cookie" if settings.v3_api_cookie
+        else "[yellow]none — expect 401[/yellow]"
+    )
+    console.print(f"[dim]{settings.v3_api_base_url} using {credential}[/dim]")
+    return build_client(
+        settings.v3_api_base_url,
+        settings.v3_api_token,
+        settings.v3_api_timeout,
+        settings.v3_api_cookie,
+    )
+
+
+def _show_api_response(resp, path: str, save_as: str) -> None:
+    """Report what came back, including what the envelope actually said."""
+    from .adapters.api_sink import _find_id, _unwrap
+
+    console.print(f"[bold]HTTP {resp.status_code}[/bold] {resp.headers.get('content-type', '')}")
+    try:
+        body = resp.json()
+    except ValueError:
+        console.print("[yellow]Not JSON.[/yellow] First 500 bytes:")
+        console.print(resp.text[:500])
+        return
+
+    ok, problem, record = _unwrap(body)
+    if ok:
+        console.print("[green]accepted[/green]")
+        found = _find_id(record, None)
+        if found:
+            console.print(f"  id assigned: [bold]{found}[/bold]")
+    else:
+        console.print(f"[red]rejected by the API despite HTTP {resp.status_code}[/red]")
+        console.print(f"  reason: {problem}")
+
+    if isinstance(record, dict):
+        console.print(f"  record keys: {', '.join(sorted(record)[:20])}")
+    elif isinstance(record, list):
+        console.print(f"  {len(record)} item(s)")
+        if record and isinstance(record[0], dict):
+            console.print(f"  item keys: {', '.join(sorted(record[0])[:20])}")
+
+    out = save_json(body, REPORTS_DIR / save_as)
+    console.print(f"\n[dim]full response: {out}[/dim]")
+
+
+@app.command(name="api-get")
+def api_get(
+    path: str = typer.Argument(..., help="e.g. /api/V1/pricing-profiles"),
+) -> None:
+    """Read an endpoint on v3's API with the credentials in .env.
+
+    For pulling what the mapping needs before writing anything: the UUIDs
+    behind pricing profiles, locations, payment terms and users, and the
+    integer codes behind v3's enum pickers. Read-only.
+    """
+    settings = _settings()
+    client = _api_client(settings)
+    try:
+        resp = client.get(path if path.startswith("/") else f"/{path}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        client.close()
+
+    name = path.strip("/").replace("/", "-") or "root"
+    _show_api_response(resp, path, f"api-{name}.json")
+
+
+@app.command(name="api-post")
+def api_post(
+    path: str = typer.Argument(..., help="e.g. /api/V1/customers"),
+    data: Optional[str] = typer.Option(None, "--data", help="JSON body, inline"),
+    file: Optional[Path] = typer.Option(None, "--file", help="JSON body, from a file"),
+    yes: bool = typer.Option(False, "--yes", help="Required — this writes to a live system"),
+) -> None:
+    """Send one record to v3's API and report exactly what happened.
+
+    Worth doing before a real run: it exercises the same client, credentials
+    and response handling the migration uses, so a 200 that actually means
+    "rejected" shows up here rather than 400 records into a migration. It also
+    reveals the payload shape a target expects, which a form's field names only
+    hint at.
+
+    Creates a record. Use obviously fake values.
+    """
+    settings = _settings()
+
+    if data and file:
+        console.print("[red]Give --data or --file, not both.[/red]")
+        raise typer.Exit(2)
+    raw = file.read_text(encoding="utf-8") if file else (data or "")
+    if not raw.strip():
+        console.print("[red]Nothing to send. Use --data '{...}' or --file body.json[/red]")
+        raise typer.Exit(2)
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        console.print(f"[red]That is not valid JSON: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    console.print(f"[bold]POST[/bold] {path}")
+    console.print_json(data=payload)
+    if not yes:
+        console.print(
+            "\n[yellow]This creates a record in a live system.[/yellow] "
+            "Re-run with [bold]--yes[/bold] if that is what you want."
+        )
+        raise typer.Exit(1)
+
+    client = _api_client(settings)
+    try:
+        resp = client.post(path if path.startswith("/") else f"/{path}", json=payload)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        client.close()
+
+    name = path.strip("/").replace("/", "-") or "root"
+    _show_api_response(resp, path, f"api-post-{name}.json")
+
+
 @app.command()
 def dashboard(
     host: str = typer.Option("127.0.0.1", help="Bind address"),

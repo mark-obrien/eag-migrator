@@ -81,6 +81,10 @@ switch ($Task) {
         Write-Host "    harvest          pull it into state/staging.sqlite"
         Write-Host "    staging          show what was harvested"
         Write-Host ""
+        Write-Host "  Talking to v3's API"
+        Write-Host "    api-get <path>   read an endpoint (UUIDs, enum codes)"
+        Write-Host "    api-post <path>  send one record and report what came back"
+        Write-Host ""
         Write-Host "  Migrating"
         Write-Host "    doctor           check both database connections"
         Write-Host "    discover         introspect both schemas"
@@ -131,6 +135,8 @@ switch ($Task) {
     }
 
     "harvest"  { Invoke-Eagm @("harvest") }
+    "api-get"  { Require-Argument "an endpoint path"; Invoke-Eagm (@("api-get") + $Rest) }
+    "api-post" { Require-Argument "an endpoint path"; Invoke-Eagm (@("api-post") + $Rest) }
     "staging"  { Invoke-Eagm @("staging") }
     "doctor"   { Invoke-Eagm @("doctor") }
     "discover" { Invoke-Eagm @("discover", "--side", "both") }
