@@ -404,3 +404,39 @@ def test_pii_is_recorded_for_the_processing_log(app, session, tmp_path):
     pii = report.collections[0].scrubbed.pii_fields
     assert {"name", "email", "phone"} <= pii
     assert any("personal data present" in s for s in report.collections[0].scrubbed.summary())
+
+
+# --- running inside Docker --------------------------------------------------
+
+
+def test_login_reads_the_cookie_from_the_environment(app, monkeypatch, tmp_path):
+    """A cookie in argv shows up in `ps` and shell history; the env avoids both.
+
+    It also dodges quoting a Cookie header through make and docker compose.
+    """
+    monkeypatch.setenv("EAGM_COOKIE", app.cookie_header)
+    from eag_migrator.web.session import Session
+
+    session = Session.from_env(app.url)
+    assert session is not None
+    assert session.cookie_header() == app.cookie_header
+
+
+def test_bearer_token_from_the_environment_is_normalised(app, monkeypatch):
+    from eag_migrator.web.session import Session
+
+    monkeypatch.delenv("EAGM_COOKIE", raising=False)
+    monkeypatch.setenv("EAGM_AUTH_TOKEN", "abc123")
+    session = Session.from_env(app.url)
+
+    assert session.headers["Authorization"] == "Bearer abc123"
+
+    monkeypatch.setenv("EAGM_AUTH_TOKEN", "Bearer already-prefixed")
+    assert Session.from_env(app.url).headers["Authorization"] == "Bearer already-prefixed"
+
+
+def test_chromium_is_launched_with_the_docker_shared_memory_workaround():
+    """Docker's default 64MB /dev/shm kills Chromium on a heavy page."""
+    from eag_migrator.web.capture import CHROMIUM_ARGS
+
+    assert "--disable-dev-shm-usage" in CHROMIUM_ARGS

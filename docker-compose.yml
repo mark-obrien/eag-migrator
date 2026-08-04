@@ -37,6 +37,8 @@ services:
       - ./state:/app/state
       - ./db:/app/db:ro
     working_dir: /app
+    # Chromium (`eagm capture`) needs more than Docker's default 64MB.
+    shm_size: 1gb
     # Idle by default; you drive it with `docker compose run --rm migrator <cmd>`
     entrypoint: ["sleep", "infinity"]
     depends_on: []

@@ -56,6 +56,14 @@ recon: ## Inspect the live v2 site:  make recon URL=https://example.com
 	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
 	$(RUN) recon $(URL)
 
+.PHONY: login
+login: ## Store a session:  EAGM_COOKIE='sid=...' make login URL=https://...
+	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
+	@test -n "$$EAGM_COOKIE$$EAGM_AUTH_TOKEN" || \
+		(echo "Set EAGM_COOKIE='<Cookie header>' or EAGM_AUTH_TOKEN=<token>" && exit 1)
+	$(COMPOSE) run --rm -e EAGM_COOKIE -e EAGM_AUTH_TOKEN \
+		--entrypoint eagm migrator login $(URL)
+
 .PHONY: capture
 capture: ## Record the site's network calls (needs WITH_BROWSER=true at build)
 	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .capture import BrowserUnavailable, find_chromium
+from .capture import CHROMIUM_ARGS, BrowserUnavailable, find_chromium
 from .session import Session
 
 
@@ -82,14 +82,16 @@ def form_login(base_url: str, spec: LoginSpec, *, headless: bool = True) -> Sess
 
     with sync_playwright() as pw:
         try:
-            browser = pw.chromium.launch(headless=headless)
+            browser = pw.chromium.launch(headless=headless, args=CHROMIUM_ARGS)
         except Exception:  # noqa: BLE001
             found = find_chromium()
             if not found:
                 raise BrowserUnavailable(
                     "no Chromium available; use `eagm login --cookies` instead"
                 ) from None
-            browser = pw.chromium.launch(headless=headless, executable_path=str(found))
+            browser = pw.chromium.launch(
+                headless=headless, executable_path=str(found), args=CHROMIUM_ARGS
+            )
 
         context = browser.new_context(ignore_https_errors=True)
         page = context.new_page()

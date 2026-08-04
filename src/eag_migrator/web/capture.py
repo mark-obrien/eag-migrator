@@ -22,6 +22,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
 MAX_BODY = 200_000
+# Docker gives a container 64MB of /dev/shm by default, which Chromium
+# exhausts on a heavy page and dies with an opaque crash. compose raises
+# shm_size too; this flag makes it survive anywhere.
+CHROMIUM_ARGS = ["--disable-dev-shm-usage"]
 # Headers that carry authentication and must be replayed to reach the API,
 # but must never be written to a report file.
 AUTH_HEADERS = {"authorization", "x-csrf-token", "x-xsrf-token", "x-api-key",
@@ -226,7 +230,7 @@ def capture(
 
     with sync_playwright() as pw:
         try:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
         except Exception as first_error:  # noqa: BLE001
             # Playwright insists on the exact Chromium build it was pinned to.
             # An image that already ships a different build is common, so look
@@ -240,7 +244,9 @@ def capture(
                     "an existing Chrome/Chromium binary."
                 ) from first_error
             try:
-                browser = pw.chromium.launch(headless=True, executable_path=str(found))
+                browser = pw.chromium.launch(
+                    headless=True, executable_path=str(found), args=CHROMIUM_ARGS
+                )
             except Exception as exc:  # noqa: BLE001
                 raise BrowserUnavailable(
                     f"could not launch Chromium at {found}: {exc}"

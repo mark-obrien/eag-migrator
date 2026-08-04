@@ -105,23 +105,37 @@ This is the EAG case. The data is behind a login, and the way in is the app's
 own internal API — the endpoints it calls to render its own list screens.
 Those are already paginated, already typed, and already scoped to the account.
 
+Everything runs in the container — `make` wraps `docker compose run`:
+
 ```bash
-# 1. Sign in with your own browser, copy the Cookie header from devtools:
-eagm login https://app.example.com --cookies 'sid=…; csrf=…'
+make build-browser        # image + Chromium (capture needs a real browser)
+
+# 1. Sign in with your own browser, copy the Cookie header from devtools.
+#    Passing it via the environment keeps it out of `ps` and shell history.
+export EAGM_COOKIE='sid=…; csrf=…'
+make login URL=https://app.example.com
 
 # 2. Drive the screens you care about and record what they call:
-eagm capture https://app.example.com \
-     --path /customers --path /quotes --path /schedule
+make cli CMD="capture https://app.example.com \
+     --path /customers --path /quotes --path /schedule"
 
 # 3. Review config/harvest.draft.yaml — capture wrote it from the endpoints
 #    it saw, including their pagination style — then:
 mv config/harvest.draft.yaml config/harvest.yaml
-eagm harvest
+make harvest
 
-# 4. From here it is an ordinary v2 database:
-export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
-eagm discover --side v2 && eagm scaffold && eagm plan && eagm run && eagm verify
+# 4. From here it is an ordinary v2 database. Put this in .env:
+#      V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+make discover && make scaffold && make plan && make migrate && make verify
 ```
+
+`config/`, `state/`, `profiles/` and `reports/` are bind-mounted, so drafts,
+sessions and the staging database live on your machine, not inside the
+container.
+
+Docker packages the tool; it does not change what your network can reach. If
+the app is only reachable from a particular network or VPN, run the container
+there.
 
 `eagm capture` also picks up the CSRF or bearer header the app's JavaScript
 attaches and saves it to the session, because cookies alone usually are not

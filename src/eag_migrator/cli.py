@@ -551,13 +551,30 @@ def login(
     from .web.fetcher import Fetcher
     from .web.login import LoginFailed, LoginSpec, form_login, import_session
 
+    # A cookie on the command line is visible in `ps` and lands in shell
+    # history, and quoting a Cookie header through make/compose is its own
+    # small nightmare. The environment avoids both.
+    if not cookies and not form:
+        from .web.session import Session
+
+        env_session = Session.from_env(url)
+        if env_session:
+            source = "EAGM_AUTH_TOKEN" if env_session.headers else "EAGM_COOKIE"
+            console.print(f"[dim]using {source} from the environment[/dim]")
+            path = env_session.save(SESSION_FILE)
+            console.print(f"[green]Session saved[/green] → {path} (mode 0600)")
+            console.print(f"  {env_session.describe()}")
+            return
+
     if not cookies and not form:
         console.print(
             "Give it a session one of two ways:\n\n"
             "  [bold]1. Import from your browser (recommended)[/bold]\n"
             "     Sign in normally, open devtools → Network → any request →\n"
-            "     copy the [bold]Cookie[/bold] request header, then:\n"
-            f"       eagm login {url} --cookies 'sid=abc; csrf=xyz'\n\n"
+            "     copy the [bold]Cookie[/bold] request header, then either:\n"
+            f"       export EAGM_COOKIE='sid=abc; csrf=xyz' && eagm login {url}\n"
+            f"       eagm login {url} --cookies 'sid=abc; csrf=xyz'\n"
+            "     (the environment form keeps it out of ps and shell history)\n\n"
             "     Or export cookies to JSON with a cookie-manager extension:\n"
             f"       eagm login {url} --cookies ./cookies.json\n\n"
             "  [bold]2. Let the migrator sign in[/bold]\n"
