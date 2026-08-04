@@ -46,9 +46,11 @@ class SqlSource:
                 ).scalar_one()
             )
 
-    def fetch_one(self, entity: EntityMap, key_value: Any) -> dict[str, Any] | None:
+    def fetch_one(
+        self, entity: EntityMap, key_value: Any, column: str | None = None
+    ) -> dict[str, Any] | None:
         tbl = self.table(entity)
-        col = tbl.c[entity.source.key]
+        col = tbl.c[column or entity.source.key]
         with self.engine.connect() as conn:
             row = conn.execute(
                 select(tbl).where(col == _coerce(key_value, col)).limit(1)

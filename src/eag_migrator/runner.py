@@ -252,7 +252,7 @@ class Runner:
 
         for batch in self.source.stream(entity, after_key=None, batch_size=batch_size):
             for src in batch:
-                source_id = src.get(entity.source.key)
+                source_id = src.get(entity.map_key)
                 out.processed += 1
                 try:
                     row = self.build_row(entity, src, ctx)
@@ -397,7 +397,7 @@ class Runner:
             last_key = batch[-1][entity.source.sort_column]
 
             for src in batch:
-                source_id = src.get(entity.source.key)
+                source_id = src.get(entity.map_key)
                 out.processed += 1
 
                 # Idempotency: never write a source row twice.

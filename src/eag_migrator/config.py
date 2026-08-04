@@ -87,3 +87,37 @@ def load_settings(env_file: Path | None = None) -> Settings:
 def ensure_dirs() -> None:
     for d in (PROFILES_DIR, REPORTS_DIR, STATE_DIR, CONFIG_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+# --- environment substitution ------------------------------------------------
+
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env(text: str) -> str:
+    """Expand ${VAR} and ${VAR:-default} in a config file.
+
+    EAG v2 is a multi-tenant platform (<shop>.everythingautoglass.com), so the
+    same config serves many shops with the tenant supplied from the
+    environment. It also keeps a customer's hostname out of a committed file.
+    """
+    missing: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        name, default = match.group(1), match.group(2)
+        value = os.getenv(name)
+        if value is not None:
+            return value
+        if default is not None:
+            return default
+        missing.append(name)
+        return match.group(0)
+
+    result = _ENV_REF.sub(replace, text)
+    if missing:
+        raise ValueError(
+            "config references unset environment variable(s): "
+            + ", ".join(sorted(set(missing)))
+            + ". Set them, or give a default with ${NAME:-value}."
+        )
+    return result

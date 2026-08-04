@@ -14,6 +14,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .config import expand_env
+
 
 class SourceSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -72,8 +74,19 @@ class EntityMap(BaseModel):
     fields: list[FieldMap]
     id_map: bool = True
     """Record source-id -> target-id so other entities can resolve foreign keys."""
+    id_map_from: str | None = None
+    """Source column recorded in the id map. Defaults to source.key.
+
+    Needed for harvested tables: `source.key` is `_id`, a row number the
+    harvester assigned, but sibling rows reference the application's own `id`.
+    Lookups have to resolve against the value children actually carry.
+    """
     batch_size: int | None = None
     note: str | None = None
+
+    @property
+    def map_key(self) -> str:
+        return self.id_map_from or self.source.key
 
 
 class Defaults(BaseModel):
@@ -161,7 +174,7 @@ def load_mapping(path: Path) -> Mapping:
             f"No mapping at {path}. Run `eagm scaffold` first to generate a draft "
             f"from the discovered schemas."
         )
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw = yaml.safe_load(expand_env(path.read_text(encoding="utf-8"))) or {}
     return Mapping.model_validate(raw)
 
 

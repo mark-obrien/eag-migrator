@@ -95,6 +95,11 @@ class ForeignKeyProfile:
     referred_table: str
     referred_columns: list[str]
     referred_schema: str | None = None
+    inferred: bool = False
+    """True when the relationship was deduced, not declared by the schema."""
+    confidence: float = 1.0
+    """Fraction of sampled child values found in the parent."""
+    evidence: str | None = None
 
 
 @dataclass
@@ -105,6 +110,7 @@ class TableProfile:
     primary_key: list[str] = field(default_factory=list)
     foreign_keys: list[ForeignKeyProfile] = field(default_factory=list)
     unique_constraints: list[list[str]] = field(default_factory=list)
+    inferred_foreign_keys: list[ForeignKeyProfile] = field(default_factory=list)
     indexes: list[dict[str, Any]] = field(default_factory=list)
     row_count: int | None = None
     sample: list[dict[str, Any]] = field(default_factory=list)
@@ -122,6 +128,9 @@ class DatabaseProfile:
     tables: list[TableProfile] = field(default_factory=list)
     detected_frameworks: list[dict[str, Any]] = field(default_factory=list)
     table_prefix: str | None = None
+
+    def relationships(self, table: TableProfile) -> list[ForeignKeyProfile]:
+        return [*table.foreign_keys, *table.inferred_foreign_keys]
 
     def table(self, name: str) -> TableProfile | None:
         for t in self.tables:
@@ -265,7 +274,145 @@ def profile_database(
 
         profile.tables.append(tp)
 
+    infer_foreign_keys(engine, profile)
     return profile
+
+
+# A column named <thing>_id almost always points at a <thing> table.
+FK_COLUMN = re.compile(
+    r"^(?P<base>.+?)_(?:id|uuid|guid|key|ref|no|num|number|fk)$", re.IGNORECASE
+)
+# Parent key columns worth testing, beyond the declared primary key. A harvested
+# staging table's PK is `_id` (a scraper row number) while the real identity —
+# the one child rows actually reference — is `id`.
+EXTRA_PARENT_KEYS = ("id", "uuid", "guid", "code", "number", "_key")
+
+FK_MIN_CONFIDENCE = 0.85
+
+
+def infer_foreign_keys(
+    engine: Engine,
+    profile: DatabaseProfile,
+    *,
+    sample: int = 200,
+) -> int:
+    """Deduce relationships the schema never declared, and prove them with data.
+
+    Needed far more often than it sounds. MyISAM tables carry no foreign keys
+    at all, plenty of older applications never declared them, and a harvested
+    API has no constraints by definition — yet `quotes.customer_id` still means
+    exactly what it looks like.
+
+    Naming alone would be a guess, so each candidate is checked against the
+    actual values: sample distinct child values, count how many exist in the
+    candidate parent column, and keep it only if nearly all of them do.
+    """
+    by_norm: dict[str, TableProfile] = {}
+    for table in profile.tables:
+        if table.error:
+            continue
+        by_norm.setdefault(_singular(table.name, profile.table_prefix), table)
+
+    found = 0
+    for table in profile.tables:
+        if table.error:
+            continue
+        declared = {c for fk in table.foreign_keys for c in fk.columns}
+
+        for col in table.columns:
+            if col.name in declared or col.primary_key:
+                continue
+            match = FK_COLUMN.match(col.name)
+            if not match:
+                continue
+            base = _singular(match.group("base").lstrip("_"), profile.table_prefix)
+            if not base:
+                continue
+            parent = by_norm.get(base)
+            if parent is None or parent.error:
+                continue
+
+            best: tuple[str, float, int] | None = None
+            parent_cols = {c.name for c in parent.columns}
+            for candidate in [*parent.primary_key, *EXTRA_PARENT_KEYS]:
+                if candidate not in parent_cols:
+                    continue
+                if parent is table and candidate == col.name:
+                    continue
+                ratio, matched = _value_overlap(
+                    engine, table, col.name, parent, candidate, sample
+                )
+                if matched and (best is None or ratio > best[1]):
+                    best = (candidate, ratio, matched)
+
+            if best and best[1] >= FK_MIN_CONFIDENCE:
+                table.inferred_foreign_keys.append(
+                    ForeignKeyProfile(
+                        columns=[col.name],
+                        referred_table=parent.name,
+                        referred_columns=[best[0]],
+                        referred_schema=parent.schema,
+                        inferred=True,
+                        confidence=round(best[1], 3),
+                        evidence=(
+                            f"{best[2]} sampled value(s) of {table.name}.{col.name} "
+                            f"matched {parent.name}.{best[0]} ({best[1]:.0%})"
+                        ),
+                    )
+                )
+                found += 1
+
+    return found
+
+
+def _singular(name: str, prefix: str | None = None) -> str:
+    n = name.lower()
+    if prefix and n.startswith(prefix.lower()):
+        n = n[len(prefix):]
+    n = re.sub(r"[^a-z0-9]", "", n)
+    if n.endswith("ies"):
+        return n[:-3] + "y"
+    if n.endswith("ses") or n.endswith("xes"):
+        return n[:-2]
+    if n.endswith("s") and not n.endswith("ss"):
+        return n[:-1]
+    return n
+
+
+def _value_overlap(
+    engine: Engine,
+    child: TableProfile,
+    child_col: str,
+    parent: TableProfile,
+    parent_col: str,
+    sample: int,
+) -> tuple[float, int]:
+    """What fraction of the child's values actually exist in the parent?"""
+    try:
+        md = MetaData()
+        child_tbl = Table(child.name, md, autoload_with=engine, schema=child.schema)
+        parent_tbl = Table(parent.name, MetaData(), autoload_with=engine, schema=parent.schema)
+
+        c = child_tbl.c[child_col]
+        p = parent_tbl.c[parent_col]
+
+        with engine.connect() as conn:
+            values = [
+                row[0]
+                for row in conn.execute(
+                    select(c).where(c.is_not(None)).distinct().limit(sample)
+                ).all()
+            ]
+            if not values:
+                return 0.0, 0
+            hits = conn.execute(
+                select(p).where(p.in_(values)).distinct()
+            ).all()
+    except Exception:  # noqa: BLE001 - type mismatches simply mean "not a key"
+        return 0.0, 0
+
+    matched = len({h[0] for h in hits} & set(values))
+    return matched / len(values), matched
 
 
 def _sample(
@@ -313,6 +460,9 @@ def load_profile(path: Path) -> DatabaseProfile:
                 primary_key=t.get("primary_key", []),
                 foreign_keys=[ForeignKeyProfile(**fk) for fk in t.get("foreign_keys", [])],
                 unique_constraints=t.get("unique_constraints", []),
+                inferred_foreign_keys=[
+                    ForeignKeyProfile(**fk) for fk in t.get("inferred_foreign_keys", [])
+                ],
                 indexes=t.get("indexes", []),
                 row_count=t.get("row_count"),
                 sample=t.get("sample", []),
@@ -387,7 +537,7 @@ def render_markdown(profile: DatabaseProfile) -> str:
                     f"| `{c.name}` | {c.type} | {'yes' if c.nullable else 'NO'} | "
                     f"{'✓' if c.primary_key else ''} |"
                 )
-            if t.foreign_keys:
+            if t.foreign_keys or t.inferred_foreign_keys:
                 lines.append("")
                 lines.append("Foreign keys:")
                 for fk in t.foreign_keys:
@@ -395,7 +545,33 @@ def render_markdown(profile: DatabaseProfile) -> str:
                         f"- `{', '.join(fk.columns)}` → "
                         f"`{fk.referred_table}({', '.join(fk.referred_columns)})`"
                     )
+                for fk in t.inferred_foreign_keys:
+                    lines.append(
+                        f"- `{', '.join(fk.columns)}` → "
+                        f"`{fk.referred_table}({', '.join(fk.referred_columns)})` "
+                        f"_(inferred, {fk.confidence:.0%})_"
+                    )
             lines.append("")
+
+    inferred = [
+        (t, fk) for t in profile.tables for fk in t.inferred_foreign_keys
+    ]
+    if inferred:
+        lines.append("## Inferred relationships\n")
+        lines.append(
+            "The schema does not declare these, but the column names and the actual "
+            "values say they exist. Confirm them before migrating — a wrong one "
+            "silently mis-links records.\n"
+        )
+        lines.append("| Child | Parent | Confidence | Evidence |")
+        lines.append("|---|---|---:|---|")
+        for t, fk in sorted(inferred, key=lambda x: -x[1].confidence):
+            lines.append(
+                f"| `{t.name}.{fk.columns[0]}` | "
+                f"`{fk.referred_table}.{fk.referred_columns[0]}` | "
+                f"{fk.confidence:.0%} | {fk.evidence} |"
+            )
+        lines.append("")
 
     orphans = [t for t in profile.tables if not t.primary_key and not t.error]
     if orphans:

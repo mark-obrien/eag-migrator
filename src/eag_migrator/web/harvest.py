@@ -25,6 +25,7 @@ import yaml
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..config import expand_env
 from .extract import ExtractError, extract_html, extract_json, flatten, links_from
 from .fetcher import DEFAULT_UA, Fetcher
 from .safety import ScrubReport, scrub
@@ -164,7 +165,8 @@ def load_config(path: Path) -> HarvestConfig:
             f"No harvest config at {path}. Run `eagm recon <url>` first — it writes "
             f"a starting config based on what it finds."
         )
-    return HarvestConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+    raw = expand_env(path.read_text(encoding="utf-8"))
+    return HarvestConfig.model_validate(yaml.safe_load(raw) or {})
 
 
 _FIELD_DEFAULTS = {"attr": "text", "many": False, "source": "selector", "required": False}

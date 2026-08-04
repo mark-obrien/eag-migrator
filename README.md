@@ -332,6 +332,48 @@ dependency order. Rows that were already in v3 are untouched.
 
 ---
 
+## Relationships the schema never declared
+
+An application's value is in its links — quotes belong to customers,
+appointments to quotes, payments to quotes. But plenty of v2 systems never
+declare a foreign key: MyISAM cannot, many older applications simply did not,
+and data harvested from an API has no constraints by definition.
+
+So discovery deduces them, and then **proves them against the data**. Naming
+alone would be a guess, so each candidate is checked by sampling distinct child
+values and counting how many exist in the candidate parent column; it is only
+kept if nearly all of them do. `quotes.customer_id` whose values match nothing
+in `customers` is rejected, and `job_number` is not turned into a relationship
+just because it ends in `_number`.
+
+The scaffolder turns each one into a `lookup` transform, orders entities so
+parents migrate first, and marks every inferred link as needing confirmation —
+including when the sample matched 100%, because a perfect match on a small
+table still is not a declaration.
+
+One subtlety this handles: on a harvested table, `_id` is a row number the
+harvester assigned while the application's own `id` is what sibling rows
+reference. `source.key` pages and resumes on `_id`; `id_map_from` records the
+real identity, so lookups resolve against the value children actually carry.
+
+## Multi-tenant platforms
+
+EAG v2 is one app per shop (`<shop>.everythingautoglass.com`), so both config
+files expand `${VAR}` and `${VAR:-default}` from the environment:
+
+```yaml
+site:
+  base_url: https://${TENANT}.everythingautoglass.com
+```
+
+```bash
+TENANT=zephyrglass eagm harvest
+```
+
+One config serves every shop, and no customer's hostname ends up in a
+committed file. An unset variable is an error, not an empty string — a silently
+malformed URL is worse than a stopped run.
+
 ## The safety properties
 
 | Property | How |

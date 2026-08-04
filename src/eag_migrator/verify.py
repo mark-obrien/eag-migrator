@@ -194,7 +194,7 @@ def _verify_entity(
 
     ctx = Ctx(state=state, run_id=run_id, entity_name=entity.name)
     for source_id, target_id in state.sample_id_pairs(entity.name, sample_size):
-        src = fetch_source(entity, source_id)
+        src = fetch_source(entity, source_id, column=entity.map_key)
         if src is None:
             ev.discrepancies.append(
                 Discrepancy(

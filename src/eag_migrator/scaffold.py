@@ -243,15 +243,25 @@ def build_draft(
 
         # FK column -> referenced entity, for lookup steps.
         fk_targets: dict[str, str] = {}
+        fk_confidence: dict[str, float] = {}
+        fk_inferred: dict[str, bool] = {}
         depends: list[str] = []
-        for fk in table.foreign_keys:
+        for fk in [*table.foreign_keys, *table.inferred_foreign_keys]:
             ref_entity = table_to_entity.get(fk.referred_table)
             if not ref_entity or ref_entity == entity_name:
                 continue
             for col in fk.columns:
                 fk_targets[col] = ref_entity
+                fk_confidence[col] = fk.confidence
+                fk_inferred[col] = fk.inferred
             if ref_entity not in depends:
                 depends.append(ref_entity)
+            if fk.inferred:
+                warnings.append(
+                    f"{table.name}.{', '.join(fk.columns)} -> {fk.referred_table}: "
+                    f"relationship inferred, not declared ({fk.confidence:.0%} of "
+                    f"sampled values matched). Confirm before migrating."
+                )
 
         fields: list[FieldMap] = []
         used_targets: set[str] = set()
@@ -341,10 +351,18 @@ def build_draft(
 
             if col.name in fk_targets:
                 steps = [{"lookup": {"entity": fk_targets[col.name], "required": False}}]
-                note = (
-                    f"foreign key -> '{fk_targets[col.name]}'. Set required: true once "
-                    f"you are sure every referenced row migrates."
-                )
+                confidence = fk_confidence.get(col.name, 1.0)
+                if not fk_inferred.get(col.name, False):
+                    note = (
+                        f"foreign key -> '{fk_targets[col.name]}'. Set required: true "
+                        f"once you are sure every referenced row migrates."
+                    )
+                else:
+                    note = (
+                        f"TODO: inferred relationship -> '{fk_targets[col.name]}' "
+                        f"({confidence:.0%} of sampled values matched). The schema does "
+                        f"not declare it — confirm before migrating."
+                    )
             elif tgt_index and col_score < 0.9:
                 note = f"TODO: fuzzy column match ({col_score:.0%}) — confirm this pairing"
 
@@ -389,10 +407,16 @@ def build_draft(
         if is_noise:
             notes.append("framework plumbing — disabled by default; enable if you need it")
 
+        # `source.key` pages and resumes; `id_map_from` is what sibling rows
+        # actually reference. On a harvested table these differ: `_id` is a
+        # scraper row number, `id` is the application's own identifier.
+        id_map_from = legacy_source if legacy_source != key else None
+
         entities.append(
             EntityMap(
                 name=entity_name,
                 enabled=not is_noise,
+                id_map_from=id_map_from,
                 source=SourceSpec(table=table.name, key=key, **{"schema": v2.schema}),
                 target=TargetSpec(
                     table=target_table or table.name,
