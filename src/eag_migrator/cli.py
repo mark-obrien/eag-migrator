@@ -64,7 +64,8 @@ def _sink(settings: Settings):
     if settings.v3_api_base_url:
         console.print(f"[dim]sink: v3 HTTP API at {settings.v3_api_base_url}[/dim]")
         return ApiSink(
-            settings.v3_api_base_url, settings.v3_api_token, settings.v3_api_timeout
+            settings.v3_api_base_url, settings.v3_api_token, settings.v3_api_timeout,
+            cookie=settings.v3_api_cookie,
         )
     console.print("[dim]sink: v3 database (SQL)[/dim]")
     return SqlSink(build_engine(settings.url_for("v3")), settings.v3_schema)

@@ -29,6 +29,8 @@ class Settings:
 
     v3_api_base_url: str | None = None
     v3_api_token: str | None = None
+    v3_api_cookie: str | None = None
+    """For a target that authenticates with a session cookie and issues no token."""
     v3_api_timeout: int = 30
 
     batch_size: int = 500
@@ -77,6 +79,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         v3_schema=_opt("V3_SCHEMA"),
         v3_api_base_url=_opt("V3_API_BASE_URL"),
         v3_api_token=_opt("V3_API_TOKEN"),
+        v3_api_cookie=_opt("V3_API_COOKIE"),
         v3_api_timeout=_int("V3_API_TIMEOUT", 30),
         batch_size=_int("BATCH_SIZE", 500),
         on_error=(os.getenv("ON_ERROR") or "record").strip().lower(),

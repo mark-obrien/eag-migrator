@@ -19,6 +19,15 @@ from .base import WriteResult
 
 RETRYABLE = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 
+# Envelope keys that carry the real outcome. An API that answers HTTP 200 with
+# {"succeeded": false, "messages": [...]} is rejecting the write — recording
+# that as an insert loses the record silently and leaves rollback nothing to
+# undo, which is the worst failure this tool can have.
+OK_KEYS = ("succeeded", "success", "ok", "isSuccess")
+ERROR_KEYS = ("messages", "errors", "error", "message", "detail", "title")
+# Where a created record's identifier tends to live.
+ID_FIELDS = ("id", "key", "uuid", "guid", "_id")
+
 
 class ApiSink:
     def __init__(
@@ -26,11 +35,17 @@ class ApiSink:
         base_url: str,
         token: str | None = None,
         timeout: int = 30,
-        id_field: str = "id",
+        id_field: str | None = None,
+        cookie: str | None = None,
     ) -> None:
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        # Some APIs authenticate with an HttpOnly session cookie and issue no
+        # token at all, so a signed-in browser session is the only credential
+        # available.
+        if cookie:
+            headers["Cookie"] = cookie
         self.client = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout)
         self.id_field = id_field
 
@@ -89,14 +104,29 @@ class ApiSink:
                 )
                 continue
 
-            target_id = None
             try:
                 body = resp.json()
-                if isinstance(body, dict):
-                    target_id = body.get(self.id_field) or body.get("data", {}).get(self.id_field)
             except Exception:  # noqa: BLE001 - a 2xx with no JSON body is still a success
-                pass
-            results.append(WriteResult(source_id, target_id, "inserted", payload=row))
+                results.append(WriteResult(source_id, None, "inserted", payload=row))
+                continue
+
+            ok, problem, record = _unwrap(body)
+            if not ok:
+                if entity.target.conflict == "skip":
+                    results.append(WriteResult(source_id, None, "skipped", payload=row))
+                else:
+                    results.append(
+                        WriteResult(
+                            source_id, None, "failed",
+                            error=f"HTTP {resp.status_code} but rejected: {problem}",
+                            payload=row,
+                        )
+                    )
+                continue
+
+            results.append(
+                WriteResult(source_id, _find_id(record, self.id_field), "inserted", payload=row)
+            )
 
         # There is no transaction to hold open over HTTP: writes are already
         # durable by the time we get here, so journalling happens after.
@@ -123,6 +153,51 @@ class ApiSink:
 
     def close(self) -> None:
         self.client.close()
+
+
+def _unwrap(body: Any) -> tuple[bool, str | None, Any]:
+    """Read an envelope's real outcome: (accepted, why not, the record).
+
+    A body with a boolean outcome key decides for itself. Anything else is a
+    2xx taken at face value.
+    """
+    if not isinstance(body, dict):
+        return True, None, body
+
+    for name in OK_KEYS:
+        flag = body.get(name)
+        if isinstance(flag, bool):
+            if flag:
+                return True, None, body.get("data", body)
+            return False, _problem(body) or f"{name}=false", body
+
+    return True, None, body
+
+
+def _problem(body: dict[str, Any]) -> str:
+    for name in ERROR_KEYS:
+        value = body.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:300]
+        if isinstance(value, (list, tuple)) and value:
+            return "; ".join(str(v) for v in value)[:300]
+        if isinstance(value, dict) and value:
+            return str(value)[:300]
+    return ""
+
+
+def _find_id(record: Any, preferred: str | None) -> Any:
+    """The identifier the target assigned, so the id map can point at it."""
+    if isinstance(record, list):
+        record = record[0] if len(record) == 1 else None
+    if not isinstance(record, dict):
+        return None
+    if preferred:
+        return record.get(preferred)
+    for name in ID_FIELDS:
+        if record.get(name) not in (None, ""):
+            return record[name]
+    return None
 
 
 def _jsonify(row: dict[str, Any]) -> dict[str, Any]:

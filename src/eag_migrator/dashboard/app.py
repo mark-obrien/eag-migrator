@@ -297,7 +297,10 @@ def build_status() -> dict[str, Any]:
 def _runner(state: RunState, mapping: Mapping, job: Any = None) -> Runner:
     settings = load_settings()
     sink = (
-        ApiSink(settings.v3_api_base_url, settings.v3_api_token, settings.v3_api_timeout)
+        ApiSink(
+            settings.v3_api_base_url, settings.v3_api_token, settings.v3_api_timeout,
+            cookie=settings.v3_api_cookie,
+        )
         if settings.v3_api_base_url
         else SqlSink(build_engine(settings.url_for("v3")), settings.v3_schema)
     )

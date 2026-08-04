@@ -780,11 +780,34 @@ def _my_rule(value, *, row, ctx, **params):
 
 ## Writing through v3's API instead of its database
 
-Set `V3_API_BASE_URL` (and `V3_API_TOKEN`) in `.env` and give each entity a
-`target.endpoint`. Every record then goes through v3's own validation and
-business logic — slower, but v3 cannot end up in a state it would itself
-reject. Nothing else in the mapping changes; the choice lives entirely behind
-the sink interface, so it stays reversible.
+Set `V3_API_BASE_URL` in `.env` and give each entity a `target.endpoint`.
+Every record then goes through v3's own validation and business logic —
+slower, but v3 cannot end up in a state it would itself reject. Nothing else
+in the mapping changes; the choice lives entirely behind the sink interface,
+so it stays reversible.
+
+Credentials: `V3_API_TOKEN` becomes an `Authorization: Bearer` header. For a
+target that issues no token and authenticates with an HttpOnly session
+cookie, paste the Cookie header from a signed-in browser into
+`V3_API_COOKIE` instead.
+
+**A 2xx is not the same as a write.** Plenty of APIs answer HTTP 200 with an
+envelope reporting the real outcome:
+
+```json
+{ "data": null, "messages": ["Phone Number is required"], "succeeded": false }
+```
+
+Recording that as an insert is the worst failure this tool could have: the
+run reports success, the record is not there, and rollback has nothing to
+undo. So a body carrying a boolean `succeeded` / `success` / `ok` / `isSuccess`
+decides its own outcome, and a false one is a failure — or a skip, if the
+entity's `conflict:` says so — with the envelope's messages as the reason. A
+body with no such key is a 2xx taken at face value.
+
+The created record's identifier is read from inside the envelope's `data`,
+trying `id`, `key`, `uuid`, `guid` and `_id` in turn, so a target keying on
+UUIDs works without configuration. Set `target.key` if it uses something else.
 
 ---
 
@@ -826,7 +849,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-204 tests, in six groups:
+214 tests, in seven groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like

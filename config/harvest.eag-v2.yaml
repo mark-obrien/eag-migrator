@@ -228,12 +228,13 @@ collections:
       sequence:
         url: /job/manage/{n}
         start: 1
-        stop: 900
-        # Must exceed the largest run of blanks *inside* the range. The board
-        # showed ids from 114 to 572, so if the sequence really starts at 114
-        # there is a leading gap of 113 — a smaller budget would stop before
-        # reaching the first real job. Raise `start` once the true minimum is
-        # known and this can come down.
+        stop: 600
+        # 572 is the confirmed ceiling: 571 and 572 exist, 573 is the first
+        # miss, and 600/700/800/900 all return the blank shell. Quotes share
+        # the sequence. The budget must still exceed the largest run of blanks
+        # *inside* the range — the board showed ids from 114, so a leading gap
+        # of 113 is possible and a smaller budget would stop before the first
+        # real job.
         stop_after_misses: 300
     extract:
       type: html
@@ -263,9 +264,10 @@ collections:
           selector: "#job-customer-city"
         - to: customer_zip
           selector: "#job-customer-zip"
-        # A State label renders but has no id in the set that was recovered.
-        # TODO: confirm on a real record and add it — an address without a
-        # state is not an address.
+        # State is the one field addressed by class rather than by id. The
+        # #job-customer-state select exists only in edit mode.
+        - to: customer_state
+          selector: ".job-state"
         - to: vehicle_vin
           selector: "#job-vehicle-vin"
         - to: vehicle_year
@@ -323,7 +325,7 @@ collections:
       sequence:
         url: /job/manage/{n}
         start: 1
-        stop: 900
+        stop: 600
         stop_after_misses: 300
     extract:
       type: html
@@ -357,7 +359,7 @@ collections:
       sequence:
         url: /job/manage/{n}
         start: 1
-        stop: 900
+        stop: 600
         stop_after_misses: 300
     extract:
       type: html
@@ -382,6 +384,115 @@ collections:
         - to: print_on_invoice
           selector: "td.print-on-invoice input[checked]"
           attr: value
+
+  # --- Customer detail: the only JSON in the whole app --------------------
+  # /customer/getcustomerdata/{id} returns 24 fields as JSON — far more than
+  # the four columns the list screen renders, including the address, the tax
+  # exemption, and the account number. This is the real customer source; the
+  # list above exists to supply the ids.
+  - name: customer_details
+    key: id
+    discover:
+      from_collection:
+        name: customers
+        column: id
+        url: /customer/getcustomerdata/{value}
+    extract:
+      type: json
+      require: [id]
+      fields:
+        - to: id
+          path: id
+        - to: full_name
+          path: fullName
+        - to: first_name
+          path: firstName
+        - to: last_name
+          path: lastName
+        - to: email
+          path: email
+        - to: phone
+          path: phone
+        - to: alt_phone
+          path: altPhone
+        - to: fax
+          path: fax
+        - to: address1
+          path: address1
+        - to: address2
+          path: address2
+        - to: city
+          path: city
+        - to: state
+          path: state
+        - to: zip
+          path: zip
+        - to: physical_address1
+          path: physicalAddress1
+        - to: physical_address2
+          path: physicalAddress2
+        - to: physical_city
+          path: advancedCity
+        - to: physical_state
+          path: advancedState
+        - to: physical_zip
+          path: advancedZip
+        - to: tax_exempt_number
+          path: taxExemptNumber
+        - to: tax_exempt_expiration
+          path: taxExemptExpirationDate
+        - to: payment_mode
+          path: paymentMode
+        - to: external_accounting_id
+          path: externalAccountingId
+        - to: account_number
+          path: accountNumber
+        - to: is_business
+          path: isBusiness
+    note: >-
+      JSON, GET, id in the path, idempotent. `accountNumber` matches the job's
+      job-customer-account where both are populated — a real shared key, but
+      sparsely filled (business customers only), so a hint rather than a join.
+      `externalAccountingId` is probably the QuickBooks link and maps
+      straight onto v3's field of the same name.
+
+  # --- Payments, per job ---------------------------------------------------
+  # The rows the job's Payments tab loads over AJAX. No cardholder data was
+  # found anywhere in these across a full sweep of the paying jobs — no PAN,
+  # no last four, no CVV, no expiry, no brand. The only processor identifier
+  # is a Stripe charge id in data-payment-id, which is a reference, not
+  # cardholder data. The scrubber still runs over every row regardless.
+  - name: job_payments
+    discover:
+      from_collection:
+        name: jobs
+        column: id
+        url: /payment/gettablerows/{value}
+        as: job_id
+    extract:
+      type: html
+      rows: "tr"
+      require: [job_id]
+      fields:
+        - to: status
+          selector: "span.badge"
+        - to: processor_ref
+          selector: "div.refund-external"
+          attr: data-payment-id
+        - to: paid_at
+          selector: "dl.more-info dt:-soup-contains('Date') + dd"
+        - to: payment_type
+          selector: "dl.more-info dt:-soup-contains('Payment Type') + dd"
+        - to: source
+          selector: "dl.more-info dt:-soup-contains('Source') + dd"
+        - to: description
+          selector: "dl.more-info dt:-soup-contains('Description') + dd"
+    note: >-
+      TODO: the fragment is table cells with no wrapper, so `rows: tr` is a
+      guess at how lxml wraps it — check the first run's samples and correct
+      it. The amount and date are bare text cells with no class, so they need
+      nth-of-type positions confirmed against a real response. Do not migrate
+      the Stripe charge id into v3 without deciding it belongs there.
 
   # --- Which jobs belong to which customer --------------------------------
   # The app will not give us a foreign key, but it will answer the question:
