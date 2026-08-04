@@ -58,7 +58,13 @@ class FieldSpec(BaseModel):
     attr: str = "text"
     """text | html | any HTML attribute name (href, src, content, ...)."""
     many: bool = False
-    source: Literal["selector", "url", "jsonld"] = "selector"
+    source: Literal["selector", "url", "jsonld", "page"] = "selector"
+    """Where the selector is evaluated.
+
+    `selector` means relative to the row when `rows:` is set. `page` means the
+    whole document even inside a row — which is how a child record on a detail
+    page reaches the id of its parent, since that id is not inside the row.
+    """
     const: Any = None
     required: bool = False
     note: str | None = None
@@ -163,6 +169,26 @@ class Extract(BaseModel):
     relative to each matching element.
     """
     fields: list[FieldSpec]
+    require: list[str] = Field(default_factory=list)
+    """Field names that must hold a value, or the record is not one.
+
+    Some apps answer a URL for a record that does not exist with HTTP 200 and
+    a blank form rather than a 404 — so status code cannot tell you whether
+    there is a record there, and walking ids would store thousands of empty
+    shells. Name the field that is only ever filled on a real record, and a
+    page without it is skipped and counted as a miss.
+    """
+
+    @model_validator(mode="after")
+    def _require_names_exist(self) -> Extract:
+        known = {f.to for f in self.fields}
+        unknown = [n for n in self.require if n not in known]
+        if unknown:
+            raise ValueError(
+                f"require names a field that is not extracted: {', '.join(unknown)} "
+                f"(fields are {', '.join(sorted(known)) or 'none'})"
+            )
+        return self
 
 
 class Collection(BaseModel):
@@ -641,6 +667,16 @@ def _harvest_collection(
             if len(result.errors) < 50:
                 result.errors.append({"url": url, "error": str(exc)})
             continue
+
+        if collection.extract.require:
+            found = [
+                record
+                for record in found
+                if all(
+                    record.get(name) not in (None, "", [], {})
+                    for name in collection.extract.require
+                )
+            ]
 
         if miss_budget:
             if found:

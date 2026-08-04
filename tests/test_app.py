@@ -488,6 +488,107 @@ def test_a_name_split_by_nesting_comes_out_in_two_pieces(app, auth_fetcher):
     assert got == {"first_name": "Dana", "last_name": "Reyes", "full_name": "Dana Reyes"}
 
 
+def _detail_config(app, **extract) -> HarvestConfig:
+    spec = {
+        "require": ["id"],
+        "fields": [
+            {"to": "id", "selector": "div.job", "attr": "data-job-id"},
+            {"to": "first_name", "selector": "#job-customer-fname"},
+            {"to": "vin", "selector": "#job-vehicle-vin"},
+        ],
+    }
+    spec.update(extract)
+    return HarvestConfig.model_validate(
+        {
+            "site": {"base_url": app.url, "rate_limit_rps": 0, "respect_robots": False},
+            "collections": [
+                {
+                    "name": "jobs",
+                    "key": "id",
+                    "discover": {
+                        "sequence": {
+                            "url": "/job/manage/{n}",
+                            "start": 7000,
+                            "stop": 7020,
+                            "stop_after_misses": 5,
+                        }
+                    },
+                    "extract": spec,
+                }
+            ],
+        }
+    )
+
+
+def test_a_blank_shell_answering_200_is_not_stored_as_a_record(app, session, tmp_path):
+    """A missing id returns a full empty form, not a 404. Without `require`
+    this stores thousands of blanks and never finds the end of the data."""
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(_detail_config(app), staging, cache_dir=tmp_path / "c",
+                         session=session)
+        rows = staging.sample("jobs", 50)
+
+    assert report.total_stored == 3                    # 7001, 7002, 7003
+    assert {r["id"] for r in rows} == {"7001", "7002", "7003"}
+    assert all(r["first_name"] for r in rows)
+
+
+def test_without_require_the_blank_shells_would_all_be_stored(app, session, tmp_path):
+    """The premise of the test above, stated rather than assumed."""
+    config = _detail_config(app, require=[])
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(config, staging, cache_dir=tmp_path / "c", session=session)
+
+    assert report.total_stored == 21                   # every id in the range
+    assert report.collections[0].fetched == 21         # and it never stopped early
+
+
+def test_a_child_row_reaches_the_page_for_its_parents_id(app, session, tmp_path):
+    """A part line has no job id inside it — that lives in the page header."""
+    config = _detail_config(
+        app,
+        rows="div.part-numbers > div.part-number",
+        require=["job_id"],
+        fields=[
+            {"to": "job_id", "selector": "div.job", "attr": "data-job-id",
+             "source": "page"},
+            {"to": "part_number", "selector": ".job-nags-part-number"},
+            {"to": "description", "selector": ".job-nags-part-description"},
+        ],
+    )
+    with Staging(tmp_path / "s.sqlite") as staging:
+        harvest(config, staging, cache_dir=tmp_path / "c", session=session)
+        rows = staging.sample("jobs", 50)
+
+    by_part = {r["part_number"]: r for r in rows}
+    assert set(by_part) == {"dw01234", "cal-001", "fw02345"}
+    # Two parts on job 7001, one on 7002, none on 7003 — each carrying its own
+    # parent, not the first job's.
+    assert by_part["dw01234"]["job_id"] == "7001"
+    assert by_part["cal-001"]["job_id"] == "7001"
+    assert by_part["fw02345"]["job_id"] == "7002"
+
+
+def test_require_must_name_a_field_that_exists():
+    """A typo here would silently drop every record instead of erroring."""
+    with pytest.raises(ValueError, match="require names a field"):
+        HarvestConfig.model_validate(
+            {
+                "site": {"base_url": "https://x.test"},
+                "collections": [
+                    {
+                        "name": "jobs",
+                        "discover": {"static": {"urls": ["/j"]}},
+                        "extract": {
+                            "require": ["jobid"],
+                            "fields": [{"to": "job_id", "selector": "div.job"}],
+                        },
+                    }
+                ],
+            }
+        )
+
+
 def test_the_eag_v2_config_is_valid_and_says_what_it_covers():
     """The config written from the survey has to at least load and hold together."""
     from pathlib import Path
@@ -497,11 +598,27 @@ def test_the_eag_v2_config_is_valid_and_says_what_it_covers():
     config = load_config(Path(__file__).resolve().parents[1] / "config" / "harvest.eag-v2.yaml")
     by_name = {c.name: c for c in config.collections}
 
-    assert {"customers", "quotes", "users", "purchase_orders", "jobs_board"} <= set(by_name)
+    assert {"customers", "quotes", "users", "purchase_orders", "jobs_board",
+            "jobs", "job_parts", "job_notes"} <= set(by_name)
     for collection in config.collections:
         chosen = [k for k in DISCOVERY_KINDS if getattr(collection.discover, k)]
         assert len(chosen) == 1, collection.name
-        assert collection.extract.rows, f"{collection.name} needs a rows selector"
+
+    # The detail route is /job/manage/{id}. /job/{id} re-renders the board, so
+    # that mistake would harvest 900 copies of the dashboard.
+    for name in ("jobs", "job_parts", "job_notes"):
+        assert by_name[name].discover.sequence.url == "/job/manage/{n}"
+        # A missing id answers 200 with a blank form, so every one of these
+        # needs a field that is only ever filled on a real record.
+        assert by_name[name].extract.require, name
+
+    # Child rows have to reach the page for the job id — it is not in the row.
+    assert any(
+        f.source == "page" for f in by_name["job_parts"].extract.fields
+    )
+    # The customer is denormalised onto the job, which is the migration's
+    # biggest risk. If that note goes, so does the only warning.
+    assert "no customer id" in (by_name["jobs"].note or "").lower()
 
     # The two facts most likely to be lost in an edit: customers page by offset
     # in steps of 25, and their name is split across a nested span.

@@ -89,12 +89,14 @@ collections:
           attr: data-id
         - to: created
           selector: "td.quote-created"
+        # Same nested-span name split as the customers list, confirmed.
+        - to: customer_first
+          selector: "td:nth-of-type(2)"
+          attr: own_text
+        - to: customer_last
+          selector: "td:nth-of-type(2) span.lname"
         - to: customer_name
           selector: "td:nth-of-type(2)"
-          note: >-
-            TODO: if this comes back as one run-on string, the cell has the
-            same <span class="lname"> split as customers — add own_text and a
-            second field for span.lname.
         - to: vehicle
           selector: "td:nth-of-type(3)"      # Year/Make/Model
         - to: total_price
@@ -107,6 +109,7 @@ collections:
 
   # --- Users: one short page ----------------------------------------------
   - name: users
+    key: id
     discover:
       static:
         urls: ["/user"]
@@ -114,6 +117,12 @@ collections:
       type: html
       rows: "table.defaultTbl.mainTbl tr[id^='row-']"
       fields:
+        # id="row-4" and the numbers are non-contiguous and start at 4, so
+        # they are real user ids rather than a per-page sequence. Kept with
+        # the prefix — it is stable and unique, and the mapping can strip it.
+        - to: id
+          selector: "."
+          attr: id
         - to: name
           selector: "td:nth-of-type(1)"
         - to: email
@@ -126,11 +135,7 @@ collections:
           selector: "td:nth-of-type(5)"
         - to: account_type
           selector: "td:nth-of-type(6)"
-    note: >-
-      4 rows. No data-id on these, so `key:` is unset and rows key on page
-      position — fine for a list this size and this stable. The row id
-      attribute is "row-N"; if N turns out to be the user id, add
-      `- to: id, selector: ".", attr: id` and set key: id.
+    note: 4 rows, no pagination.
 
   # --- Purchase orders: 41 pages, page number in the query ----------------
   - name: purchase_orders
@@ -206,33 +211,226 @@ collections:
       pagination. Use it for the board's own state; use the jobs collection
       below for the actual record set.
 
-  # --- Jobs, by id --------------------------------------------------------
-  # The only way to enumerate every job: /job/{id} loads a single record, so
-  # walk the ids. They are sparse wherever a job was deleted, hence the miss
-  # budget rather than stopping at the first gap.
+  # --- Jobs, walked by id -------------------------------------------------
+  # The detail route is /job/manage/{id}. /job/{id} re-renders the board, so
+  # pointing this at /job/{n} would harvest 900 copies of the dashboard.
   #
-  # DISABLED until the detail page has been surveyed — the selectors below are
-  # placeholders and would harvest 2,000 pages of nulls. To finish it, inspect
-  # one /job/{id} page, then replace these fields and remove this comment.
+  # A non-existent id answers HTTP 200 with a blank, editable job form — the
+  # status code cannot tell you whether there is a record there. What can is
+  # `div.job[data-job-id]`, which is empty on the shell. Hence `require: [id]`:
+  # a page without it is skipped and counts as a miss.
   #
-  # - name: jobs
-  #   key: id
+  # The three job collections below all walk the same URLs. The HTTP cache
+  # means only the first one costs requests; the other two read from disk.
+  - name: jobs
+    key: id
+    discover:
+      sequence:
+        url: /job/manage/{n}
+        start: 1
+        stop: 900
+        # Must exceed the largest run of blanks *inside* the range. The board
+        # showed ids from 114 to 572, so if the sequence really starts at 114
+        # there is a leading gap of 113 — a smaller budget would stop before
+        # reaching the first real job. Raise `start` once the true minimum is
+        # known and this can come down.
+        stop_after_misses: 300
+    extract:
+      type: html
+      # No `rows:` — a detail page is one record, so selectors read the page.
+      require: [id]
+      fields:
+        - to: id
+          selector: "div.job"
+          attr: data-job-id
+        # Every value node carries a stable semantic id, so these are direct.
+        # The customer is denormalised onto the job — see the note below.
+        - to: customer_first_name
+          selector: "#job-customer-fname"
+        - to: customer_last_name
+          selector: "#job-customer-lname"
+        - to: customer_account
+          selector: "#job-customer-account"
+        - to: customer_phone
+          selector: "#job-customer-phone"
+        - to: customer_email
+          selector: "#job-customer-email"
+        - to: customer_address1
+          selector: "#job-customer-address1"
+        - to: customer_address2
+          selector: "#job-customer-address2"
+        - to: customer_city
+          selector: "#job-customer-city"
+        - to: customer_zip
+          selector: "#job-customer-zip"
+        # A State label renders but has no id in the set that was recovered.
+        # TODO: confirm on a real record and add it — an address without a
+        # state is not an address.
+        - to: vehicle_vin
+          selector: "#job-vehicle-vin"
+        - to: vehicle_year
+          selector: "#job-vehicle-year"
+        - to: vehicle_make
+          selector: "#job-vehicle-make"
+        - to: vehicle_model
+          selector: "#job-vehicle-model"
+        - to: vehicle_body
+          selector: "#job-vehicle-body"
+        - to: vehicle_plate
+          selector: "#job-vehicle-plate"
+        - to: vehicle_mileage
+          selector: "#job-vehicle-mileage"
+        - to: nags_car_id
+          selector: "#job-vehicle-nagscarid"
+        - to: order_num
+          selector: "#job-order-num"
+        - to: install_date
+          selector: "#job-install-date"
+        - to: install_time
+          selector: "#job-install-time"
+        - to: glass_order_date
+          selector: "#job-glass-order-date"
+        - to: glass_arrival_date
+          selector: "#job-glass-arrival-date"
+        - to: referral_date
+          selector: "#job-referral-date"
+        - to: loss_date
+          selector: "#job-loss-date"
+        - to: loss_cause
+          selector: "#job-loss-cause"
+        - to: total_due
+          selector: "#job-total-due"
+        - to: salesperson
+          selector: "#job-salesperson"
+        - to: salesperson_user_id
+          selector: "#job-salesperson"
+          attr: data-id
+        # A <select> — its text would be every option concatenated, so take
+        # only the id it carries.
+        - to: installer_user_id
+          selector: "#job-installer"
+          attr: data-id
+    note: >-
+      THE CUSTOMER IS DENORMALISED ONTO THE JOB. There is no customer id
+      anywhere in this page — no data-customer-id, no hidden input, no link to
+      /customer/{id}. Jobs can only be reattached to customers by matching on
+      name, phone, email and address. Read the note at the bottom of this file
+      before designing that; it is the highest-risk part of the migration.
+
+  # --- Glass parts, one row per line item on a job ------------------------
+  - name: job_parts
+    discover:
+      sequence:
+        url: /job/manage/{n}
+        start: 1
+        stop: 900
+        stop_after_misses: 300
+    extract:
+      type: html
+      rows: "div.part-numbers > div.part-number"
+      # A part with no job to hang off is not worth storing.
+      require: [job_id]
+      fields:
+        # `page` reads the document rather than the row — the job's id is in
+        # the page header, outside every part block.
+        - to: job_id
+          selector: "div.job"
+          attr: data-job-id
+          source: page
+        - to: part_number
+          selector: ".job-part-number"
+        - to: nags_part_number
+          selector: ".job-nags-part-number"
+        - to: nags_description
+          selector: ".job-nags-part-description"
+        - to: nags_colour
+          selector: ".job-nags-part-color-description"
+    note: >-
+      The surveyed job had a single part block; jobs with several will produce
+      several rows. `.job-part-type` is a form control rather than text and is
+      left out until its markup is known.
+
+  # --- Notes, one row per note on a job -----------------------------------
+  - name: job_notes
+    key: note_id
+    discover:
+      sequence:
+        url: /job/manage/{n}
+        start: 1
+        stop: 900
+        stop_after_misses: 300
+    extract:
+      type: html
+      rows: "table.notes-table tr.notes-table-row"
+      require: [note_id]
+      fields:
+        - to: job_id
+          selector: "div.job"
+          attr: data-job-id
+          source: page
+        # The note's id is the checkbox value (its name is "note-<id>").
+        - to: note_id
+          selector: "td.print-on-invoice input"
+          attr: value
+        - to: heading
+          selector: "td.sequential-notes h3"
+          attr: own_text
+        - to: created_at
+          selector: "td.sequential-notes h3 span.is-raw-datetime"
+        - to: body
+          selector: "td.sequential-notes p"
+        - to: print_on_invoice
+          selector: "td.print-on-invoice input[checked]"
+          attr: value
+
+  # --- Payments: NOT YET, and not from this page --------------------------
+  # The payments table on the job detail is populated over AJAX
+  # (/payment/gettablerows/…, /job/getinvoicerows/…), so it is empty in the
+  # HTML this client fetches. The surveyed job had no payments, so the row
+  # markup is unknown either way.
+  #
+  # Those endpoints are the way in — they take a job id and return the rows.
+  # Fetch one by hand first to see whether it answers JSON or an HTML
+  # fragment, then finish this as either an `api:` or a `sequence:`
+  # collection:
+  #
+  #   curl -H "Cookie: $EAGM_COOKIE" \
+  #        https://<shop>.everythingautoglass.com/payment/gettablerows/520
+  #
+  # - name: job_payments
   #   discover:
   #     sequence:
-  #       url: /job/{n}
+  #       url: /payment/gettablerows/{n}
   #       start: 1
-  #       stop_after_misses: 100
-  #   extract:
-  #     type: html
-  #     # No `rows:` — a detail page is one record, so selectors run against
-  #     # the whole page.
-  #     fields:
-  #       - to: id
-  #         source: url
-  #       - to: status
-  #         selector: "TODO"
-  #       - to: customer_name
-  #         selector: "TODO"
+  #       stop: 900
+  #   extract: ...
+
+# ---------------------------------------------------------------------------
+# THE ONE THAT NEEDS A DECISION: jobs have no customer id.
+#
+# The customer is copied onto each job as flat fields. The integer that
+# identifies a customer on /customer never appears on the job, so after
+# harvesting there is no key to join on and the link has to be reconstructed
+# from the data itself.
+#
+# Do not match on name. 740 customers in one town will contain repeated
+# names, and a wrong link is silent — the job simply belongs to the wrong
+# person in v3, and nothing downstream complains.
+#
+# The order to try, best first:
+#   1. Account number, if it turns out to be populated on real records. It
+#      was empty on the surveyed job, so check a B2B one before relying on it.
+#   2. Normalised phone — digits only, last 10. Strongest of the free-text
+#      fields and the most likely to be unique.
+#   3. Lowercased email, where present.
+#   4. Last name + zip, only to break ties, never on its own.
+#
+# Whatever the rule, count it before trusting it: how many jobs match exactly
+# one customer, how many match none, how many match several. Migrate the
+# unambiguous ones, and leave the rest for a person to resolve rather than
+# letting the tool guess. `eagm plan` will show the lookup failures; treat a
+# non-zero ambiguous count as a stop, not a warning.
+# ---------------------------------------------------------------------------
 
 # Not harvestable as lists, and why:
 #

@@ -186,6 +186,33 @@ LIST_ROW = """    <tr class="customer" data-id="%(id)s">
 
 LIST_PAGE_SIZE = 2
 
+# A record detail page. The nasty part is what a *missing* id returns: HTTP
+# 200 and a blank editable form, so the status code says nothing and the only
+# evidence is an empty data-job-id. Real apps do this.
+DETAIL_HTML = """<!DOCTYPE html>
+<html><head><title>Job — Clearview Ops</title></head><body>
+<div class="job" data-job-id="%(id)s">
+  <p class="tab-card-header">First Name</p>
+  <p class="tab-card-content" id="job-customer-fname">%(fname)s</p>
+  <p class="tab-card-content" id="job-customer-lname">%(lname)s</p>
+  <p class="tab-card-content" id="job-vehicle-vin">%(vin)s</p>
+  <div class="part-numbers">%(parts)s</div>
+</div>
+</body></html>"""
+
+DETAIL_PART = """
+    <div class="part-number tab-sub-container">
+      <div class="job-nags-part-number">%(part)s</div>
+      <p class="job-nags-part-description">%(desc)s</p>
+    </div>"""
+
+# Ids 7001-7003 exist (they match APPOINTMENTS), with a gap at 7004+.
+JOB_PARTS = {
+    7001: [("dw01234", "Windshield"), ("cal-001", "Calibration")],
+    7002: [("fw02345", "Door glass")],
+    7003: [],
+}
+
 # Every destructive URL the fixture is asked to serve lands here. A crawl that
 # leaves this empty is the whole point; asserting on it beats inferring from
 # response bodies.
@@ -285,6 +312,30 @@ class Handler(BaseHTTPRequestHandler):
             self._send(LIST_HTML % {
                 "rows": "\n".join(LIST_ROW % c for c in chunk),
                 "pager": "",
+            })
+            return
+
+        if path.startswith("/job/manage/"):
+            wanted = path.rsplit("/", 1)[-1]
+            job = next((a for a in APPOINTMENTS if str(a["id"]) == wanted), None)
+            if job is None:
+                # The blank shell. 200, no error, empty id — indistinguishable
+                # from a real record by anything but the content.
+                self._send(DETAIL_HTML % {
+                    "id": "", "fname": "", "lname": "", "vin": "", "parts": "",
+                })
+                return
+            quote = next((q for q in QUOTES if q["id"] == job["quote_id"]), {})
+            customer = (quote.get("customer") or {}).get("name", " ").split(" ", 1)
+            self._send(DETAIL_HTML % {
+                "id": job["id"],
+                "fname": customer[0],
+                "lname": customer[1] if len(customer) > 1 else "",
+                "vin": quote.get("vin") or "",
+                "parts": "".join(
+                    DETAIL_PART % {"part": p, "desc": d}
+                    for p, d in JOB_PARTS.get(job["id"], [])
+                ),
             })
             return
 

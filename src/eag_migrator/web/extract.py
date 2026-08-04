@@ -85,10 +85,14 @@ def extract_html(
     or every record comes back identical to the first.
     """
     doc = soup or BeautifulSoup(html, "lxml")
-    scope = node if node is not None else doc
+    row_scope = node if node is not None else doc
     out: dict[str, Any] = {}
 
     for field in fields:
+        # `page` reaches out of the row to the document — a part line on a job
+        # needs the job's id, and that lives in the page header, not the row.
+        scope = doc if field.source == "page" else row_scope
+
         if field.source == "url":
             out[field.to] = url
             continue

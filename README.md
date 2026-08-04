@@ -328,6 +328,48 @@ ids: they're sparse wherever a record was ever deleted, and a single gap is a
 hole, not the end. A 200 response holding no records counts as a miss, not
 just a 404 — the awkward case is the one that ends a walk in practice.
 
+#### When a missing record answers 200
+
+Plenty of apps answer a URL for a record that doesn't exist with a blank
+editable form rather than a 404. The status code then tells you nothing, and
+walking ids would store thousands of empty shells and never find the end.
+`require:` names the fields that only a real record has:
+
+```yaml
+extract:
+  require: [id]
+  fields:
+    - to: id
+      selector: "div.job"
+      attr: data-job-id      # empty string on the blank form
+```
+
+A page whose required fields are empty is skipped and counts as a miss. A
+`require:` naming a field that isn't extracted is a config error rather than a
+silent drop of every record.
+
+#### Child records on a detail page
+
+A detail page often holds repeating sub-lists — line items, notes, payments.
+Set `rows:` to the repeating element and the page becomes a child collection.
+The catch is the parent's id, which is on the page and *not* in the row.
+`source: page` reads the document rather than the row:
+
+```yaml
+rows: "div.part-numbers > div.part-number"
+require: [job_id]
+fields:
+  - to: job_id
+    selector: "div.job"
+    attr: data-job-id
+    source: page           # out of the row, into the page
+  - to: part_number
+    selector: ".job-nags-part-number"
+```
+
+Several collections over the same URLs cost one crawl, not several — the HTTP
+cache means the second and third read from disk.
+
 The crawler that walks the pagination has the same refusals as `--explore`: no
 "Delete", no "Refund", no "Log out", nothing carrying `data-method` or a
 confirmation prompt. Each refusal is reported on the collection.
@@ -757,7 +799,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-189 tests, in six groups:
+193 tests, in six groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
