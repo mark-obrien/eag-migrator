@@ -151,6 +151,35 @@ v3-mysql `13307`, v2-postgres `15432`, v3-postgres `15433`, adminer `18080`.
 Override the dashboard with `EAGM_DASHBOARD_PORT` and adminer with
 `ADMINER_PORT`.
 
+### On Windows
+
+`make` is a Unix tool, and `VAR=value command` is POSIX shell syntax — neither
+works in PowerShell. Use the bundled script instead, which runs the same
+docker compose commands:
+
+```powershell
+.\eagm.ps1                 # list the tasks
+.\eagm.ps1 build
+.\eagm.ps1 dashboard
+.\eagm.ps1 recon https://shop.everythingautoglass.com
+.\eagm.ps1 cli plan --limit 100
+```
+
+If PowerShell refuses to run it, that is the execution policy rather than the
+script: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
+
+Settings go in `.env` on every platform, so no task needs an environment
+prefix. If you would rather not use the script at all, every task is a plain
+compose command:
+
+| Task | Command |
+|---|---|
+| Build | `docker compose build` |
+| Dashboard | `docker compose up -d dashboard` |
+| Any `eagm` command | `docker compose run --rm --entrypoint eagm migrator <args>` |
+
+The dashboard needs none of this — once it is up, everything is buttons.
+
 ---
 
 ## No database, no API
@@ -170,9 +199,8 @@ Everything runs in the container — `make` wraps `docker compose run`:
 ```bash
 make build                # includes Chromium, which capture and sign-in need
 
-# 1. Sign in with your own browser, copy the Cookie header from devtools.
-#    Passing it via the environment keeps it out of `ps` and shell history.
-export EAGM_COOKIE='sid=…; csrf=…'
+# 1. Sign in. Either use the dashboard's sign-in form, or put the Cookie
+#    header from your browser's devtools into .env as EAGM_COOKIE and:
 make login URL=https://app.example.com
 
 # 2. Drive the screens you care about and record what they call:
@@ -184,10 +212,14 @@ make cli CMD="capture https://app.example.com \
 mv config/harvest.draft.yaml config/harvest.yaml
 make harvest
 
-# 4. From here it is an ordinary v2 database. Put this in .env:
+# 4. From here it is an ordinary v2 database. Set this in .env:
 #      V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
 make discover && make scaffold && make plan && make migrate && make verify
 ```
+
+Everything configurable lives in **`.env`**, which docker compose reads by
+itself. Nothing needs a `VAR=value command` prefix — that syntax only works in
+a POSIX shell, and it would put credentials in your shell history anyway.
 
 `config/`, `state/`, `profiles/` and `reports/` are bind-mounted, so drafts,
 sessions and the staging database live on your machine, not inside the
@@ -269,7 +301,7 @@ eagm capture https://the-v2-site.example  # what does it call at runtime?
 mv config/harvest.draft.yaml config/harvest.yaml
 eagm harvest
 
-export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+# set V2_DATABASE_URL=sqlite:////app/state/staging.sqlite in .env, then:
 eagm discover --side v2 && eagm scaffold && eagm plan && eagm run && eagm verify
 ```
 
