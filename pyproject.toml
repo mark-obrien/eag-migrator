@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eag-migrator"
+version = "0.1.0"
+description = "Discovery-first migrator for Everything Auto Glass v2 -> v3"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+eagm = "eag_migrator.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

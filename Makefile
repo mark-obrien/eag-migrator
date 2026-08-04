@@ -1,0 +1,82 @@
+.DEFAULT_GOAL := help
+SHELL := /bin/bash
+
+# Run a migrator command inside the container:  make cli CMD="discover --side v2"
+COMPOSE := docker compose
+RUN := $(COMPOSE) run --rm --entrypoint eagm migrator
+
+.PHONY: help
+help: ## Show this help
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: setup
+setup: .env ## Create .env from .env.example if it does not exist
+
+.env:
+	@cp .env.example .env
+	@echo "Created .env from .env.example — edit it with your real connection details."
+
+.PHONY: build
+build: setup ## Build the migrator image
+	$(COMPOSE) build
+
+.PHONY: up
+up: setup ## Start the databases named in COMPOSE_PROFILES (see .env)
+	$(COMPOSE) up -d
+
+.PHONY: down
+down: ## Stop everything (volumes survive)
+	$(COMPOSE) down
+
+.PHONY: clean
+clean: ## Stop everything and delete the database volumes
+	$(COMPOSE) down -v
+
+.PHONY: logs
+logs: ## Tail container logs
+	$(COMPOSE) logs -f
+
+.PHONY: shell
+shell: ## Shell inside the migrator container
+	$(COMPOSE) run --rm --entrypoint bash migrator
+
+.PHONY: cli
+cli: ## Run any eagm command:  make cli CMD="plan --limit 100"
+	$(RUN) $(CMD)
+
+.PHONY: doctor
+doctor: ## Check both database connections
+	$(RUN) doctor
+
+.PHONY: discover
+discover: ## Introspect both databases into profiles/
+	$(RUN) discover --side both
+
+.PHONY: scaffold
+scaffold: ## Draft config/mapping.draft.yaml from the profiles
+	$(RUN) scaffold
+
+.PHONY: plan
+plan: ## Dry run — transform everything, write nothing
+	$(RUN) plan
+
+.PHONY: migrate
+migrate: ## Run the migration for real
+	$(RUN) run --yes
+
+.PHONY: verify
+verify: ## Verify the most recent migration
+	$(RUN) verify
+
+.PHONY: runs
+runs: ## List previous runs
+	$(RUN) runs
+
+.PHONY: test
+test: ## Run the test suite in the container
+	$(COMPOSE) run --rm --entrypoint sh migrator -c "pip install -q pytest && python -m pytest -q"
+
+.PHONY: test-local
+test-local: ## Run the test suite on the host
+	python -m pytest -q

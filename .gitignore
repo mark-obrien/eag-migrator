@@ -1,0 +1,32 @@
+# Secrets — never commit real connection strings
+.env
+*.env
+!.env.example
+
+# Discovery output & run artifacts (may contain customer data)
+/profiles/*.json
+/profiles/*.md
+/reports/*
+/state/*
+!**/.gitkeep
+
+# Database dumps — these are production data, keep them out of git
+/db/v2-seed/*
+/db/v3-seed/*
+!/db/v2-seed/.gitkeep
+!/db/v3-seed/.gitkeep
+
+# Generated mapping drafts (review, rename, then commit deliberately)
+/config/mapping.draft.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/

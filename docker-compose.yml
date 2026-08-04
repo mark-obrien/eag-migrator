@@ -1,0 +1,127 @@
+# ---------------------------------------------------------------------------
+# EAG v2 -> v3 migrator environment.
+#
+# You told me you don't know which database engine EAG runs on, so both are
+# defined here behind compose profiles. Turn on only the ones you need:
+#
+#   docker compose --profile v2-mysql --profile v3-postgres up -d
+#
+# Or set COMPOSE_PROFILES=v2-mysql,v3-postgres in your .env and just run
+# `docker compose up -d`. See the Makefile for shortcuts.
+#
+# Drop a .sql dump into db/v2-seed/ and it is loaded automatically on first
+# boot of the v2 container. Same for db/v3-seed/ and v3.
+# ---------------------------------------------------------------------------
+
+name: eag-migrator
+
+services:
+  migrator:
+    build: .
+    # Optional so a missing .env fails with `eagm doctor` telling you exactly
+    # what to set, rather than a cryptic compose stat error. `make setup`
+    # creates it for you.
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Live-mount the source so edits take effect without a rebuild.
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./profiles:/app/profiles
+      - ./reports:/app/reports
+      - ./state:/app/state
+      - ./db:/app/db:ro
+    working_dir: /app
+    # Idle by default; you drive it with `docker compose run --rm migrator <cmd>`
+    entrypoint: ["sleep", "infinity"]
+    depends_on: []
+
+  # --- EAG v2 candidates ---------------------------------------------------
+  v2-mysql:
+    profiles: ["v2-mysql"]
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: eag_v2
+      MYSQL_USER: eag
+      MYSQL_PASSWORD: eag
+    volumes:
+      - v2-mysql-data:/var/lib/mysql
+      - ./db/v2-seed:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "13306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ueag", "-peag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  v2-postgres:
+    profiles: ["v2-postgres"]
+    image: postgres:16
+    environment:
+      POSTGRES_DB: eag_v2
+      POSTGRES_USER: eag
+      POSTGRES_PASSWORD: eag
+    volumes:
+      - v2-postgres-data:/var/lib/postgresql/data
+      - ./db/v2-seed:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eag -d eag_v2"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --- EAG v3 candidates ---------------------------------------------------
+  v3-postgres:
+    profiles: ["v3-postgres"]
+    image: postgres:16
+    environment:
+      POSTGRES_DB: eag_v3
+      POSTGRES_USER: eag
+      POSTGRES_PASSWORD: eag
+    volumes:
+      - v3-postgres-data:/var/lib/postgresql/data
+      - ./db/v3-seed:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "15433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eag -d eag_v3"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  v3-mysql:
+    profiles: ["v3-mysql"]
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: eag_v3
+      MYSQL_USER: eag
+      MYSQL_PASSWORD: eag
+    volumes:
+      - v3-mysql-data:/var/lib/mysql
+      - ./db/v3-seed:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "13307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ueag", "-peag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --- Optional: browse either database in the browser ---------------------
+  adminer:
+    profiles: ["tools"]
+    image: adminer:4
+    ports:
+      - "18080:8080"
+
+volumes:
+  v2-mysql-data:
+  v2-postgres-data:
+  v3-postgres-data:
+  v3-mysql-data:

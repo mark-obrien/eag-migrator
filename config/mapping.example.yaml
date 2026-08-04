@@ -1,0 +1,156 @@
+# ---------------------------------------------------------------------------
+# Example mapping — a worked illustration, NOT EAG's real schema.
+#
+# `eagm scaffold` generates a draft of this file from the two discovered
+# schemas. This example exists to show what the finished article looks like
+# once the guesses have been answered.
+#
+# Copy to config/mapping.yaml to use it.
+# ---------------------------------------------------------------------------
+version: 1
+
+defaults:
+  batch_size: 500
+  on_error: record        # record = log and continue | abort = stop the run
+
+entities:
+  # --- customers ---------------------------------------------------------
+  - name: customers
+    source:
+      table: tbl_customer
+      key: cust_id            # unique + sortable: used for paging and resume
+      where: "deleted = 0"    # optional raw SQL filter on the source
+    target:
+      table: customers
+      key: id
+      conflict: skip          # skip | update | error
+    depends_on: []
+    id_map: true              # remember cust_id -> customers.id for lookups
+    fields:
+      # No `to: id` entry at all: let v3 generate the primary key. The v2 id
+      # is preserved in legacy_id below so nothing is lost.
+      - to: legacy_id
+        from: cust_id
+        transform: [int]
+
+      - to: email
+        from: email_address
+        transform: [trim, email]
+        required: true
+
+      - to: full_name
+        from: [first_name, last_name]
+        transform:
+          - concat: {sep: " "}
+          - truncate: {length: 120}
+
+      - to: phone
+        from: phone_number
+        transform: [phone]
+
+      - to: postal_code
+        from: zip
+        transform:
+          - postal_code: {region: US}
+
+      - to: status
+        from: acct_status
+        transform:
+          - map:
+              values:
+                "A": active
+                "I": inactive
+                "H": on_hold
+                "*": inactive     # "*" catches anything unlisted
+        required: true
+
+      - to: created_at
+        from: date_created
+        transform: [to_datetime]
+        default: "@now"           # "@now" resolves to the current UTC time
+
+      - to: notes
+        from: comments
+        transform: [strip_html, trim, nullif_empty]
+
+  # --- vehicles ----------------------------------------------------------
+  - name: vehicles
+    source:
+      table: tbl_vehicle
+      key: veh_id
+    target:
+      table: vehicles
+      key: id
+      conflict: skip
+    depends_on: [customers]     # forces customers to migrate first
+    fields:
+      - to: customer_id
+        from: cust_id
+        transform:
+          # Resolve the v2 customer id to the id v3 gave that customer.
+          - lookup: {entity: customers, required: true}
+        required: true
+
+      - to: vin
+        from: vin_number
+        transform:
+          - vin: {strict: false}
+        note: "Set strict: true once the bad VINs in v2 are cleaned up."
+
+      - to: year
+        from: veh_year
+        transform: [int]
+
+      - to: make
+        from: veh_make
+        transform: [trim, title]
+
+      - to: model
+        from: veh_model
+        transform: [trim, title]
+
+  # --- work orders -------------------------------------------------------
+  - name: work_orders
+    source:
+      table: tbl_workorder
+      key: wo_id
+      order_by: wo_id
+    target:
+      table: work_orders
+      key: id
+      conflict: skip
+    depends_on: [customers, vehicles]
+    batch_size: 200             # overrides defaults.batch_size for this entity
+    fields:
+      - to: customer_id
+        from: cust_id
+        transform:
+          - lookup: {entity: customers, required: true}
+        required: true
+
+      - to: vehicle_id
+        from: veh_id
+        transform:
+          - lookup: {entity: vehicles, required: false}
+
+      - to: nags_part_number
+        from: part_no
+        transform: [nags]
+
+      - to: total_cents
+        from: total_amount
+        transform:
+          - decimal: {places: 2}
+        note: "v3 stores cents as an integer — confirm whether this needs *100."
+
+      - to: scheduled_for
+        from: sched_date
+        transform: [to_datetime]
+
+      - to: is_mobile
+        from: mobile_flag
+        transform: [bool]
+        default: false
+
+      - to: source_system
+        const: "eag-v2"           # a literal on every row
