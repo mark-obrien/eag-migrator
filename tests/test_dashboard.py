@@ -293,3 +293,89 @@ def test_runner_stops_between_batches_and_stays_resumable(tmp_path):
 
     rows = sqlite3.connect(v3).execute("SELECT COUNT(*) FROM people").fetchone()[0]
     assert rows == 20
+
+
+# --- port selection ---------------------------------------------------------
+
+
+def test_default_port_avoids_the_usual_suspects():
+    """8080 and friends are contended; the project's own ports are taken."""
+    from eag_migrator.dashboard.net import DEFAULT_PORT
+
+    contended = {80, 443, 3000, 3001, 4200, 5000, 5173, 8000, 8008, 8080, 8081,
+                 8443, 8888, 9000, 9090, 5432, 3306, 6379, 27017}
+    project = {13306, 13307, 15432, 15433, 18080}   # already published by compose
+    assert DEFAULT_PORT not in contended
+    assert DEFAULT_PORT not in project
+    # Clear of the Linux ephemeral range, which the OS hands out to clients.
+    assert 1024 < DEFAULT_PORT < 32768
+
+
+def test_port_comes_from_the_environment(monkeypatch):
+    from eag_migrator.dashboard.net import DEFAULT_PORT, configured_port
+
+    monkeypatch.delenv("EAGM_DASHBOARD_PORT", raising=False)
+    assert configured_port() == DEFAULT_PORT
+
+    monkeypatch.setenv("EAGM_DASHBOARD_PORT", "12345")
+    assert configured_port() == 12345
+
+    # Garbage falls back rather than crashing at startup.
+    for junk in ("", "not-a-port", "0", "70000", "-1"):
+        monkeypatch.setenv("EAGM_DASHBOARD_PORT", junk)
+        assert configured_port() == DEFAULT_PORT
+
+
+def test_a_port_in_use_is_detected():
+    import socket
+
+    from eag_migrator.dashboard.net import find_free, is_free
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        busy = taken.getsockname()[1]
+
+        assert not is_free(busy)
+        alternative = find_free(near=busy)
+        assert alternative != busy
+        assert is_free(alternative)
+
+    # Released once the listener closes.
+    assert is_free(busy)
+
+
+def test_suggestion_stays_near_the_requested_port():
+    """A nearby port keeps the URL recognisable instead of jumping to random."""
+    import socket
+
+    from eag_migrator.dashboard.net import find_free
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        busy = taken.getsockname()[1]
+        suggestion = find_free(near=busy)
+
+    assert busy < suggestion <= busy + 12 or suggestion > 1024
+
+
+def test_dashboard_refuses_to_start_on_a_busy_port(monkeypatch):
+    """It should say so, not surface a traceback from inside the server."""
+    import socket
+
+    from typer.testing import CliRunner
+
+    from eag_migrator.cli import app as cli
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        busy = taken.getsockname()[1]
+
+        result = CliRunner().invoke(cli, ["dashboard", "--port", str(busy)])
+
+    assert result.exit_code == 1
+    assert "already in use" in result.output
+    assert "--auto-port" in result.output
+    assert "EAGM_DASHBOARD_PORT" in result.output

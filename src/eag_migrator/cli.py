@@ -965,7 +965,10 @@ def staging(
 @app.command()
 def dashboard(
     host: str = typer.Option("127.0.0.1", help="Bind address"),
-    port: int = typer.Option(8080, help="Port"),
+    port: int = typer.Option(0, help="Port (default: $EAGM_DASHBOARD_PORT, else 19080)"),
+    auto_port: bool = typer.Option(
+        False, "--auto-port", help="If the port is busy, quietly use a free one"
+    ),
     reload: bool = typer.Option(False, help="Auto-reload on code changes"),
 ) -> None:
     """Serve the web dashboard: drive and watch the whole migration in a browser.
@@ -985,6 +988,24 @@ def dashboard(
             "`pip install fastapi uvicorn jinja2 python-multipart markdown`."
         )
         raise typer.Exit(1) from exc
+
+    from .dashboard.net import configured_port, find_free, is_free
+
+    port = port or configured_port()
+    if not is_free(port, host):
+        alternative = find_free(host, near=port)
+        if not auto_port:
+            console.print(
+                f"[red]Port {port} is already in use.[/red] Something else is "
+                f"listening there.\n"
+                f"  Try:  [bold]eagm dashboard --port {alternative}[/bold]\n"
+                f"  Or:   [bold]eagm dashboard --auto-port[/bold]\n"
+                f"  Or set [bold]EAGM_DASHBOARD_PORT={alternative}[/bold] in .env "
+                f"(docker compose reads it too)."
+            )
+            raise typer.Exit(1)
+        console.print(f"[yellow]Port {port} was busy; using {alternative}.[/yellow]")
+        port = alternative
 
     if host not in ("127.0.0.1", "localhost") and not os.getenv("EAGM_DASHBOARD_TOKEN"):
         console.print(

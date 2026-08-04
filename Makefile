@@ -46,9 +46,9 @@ cli: ## Run any eagm command:  make cli CMD="plan --limit 100"
 	$(RUN) $(CMD)
 
 .PHONY: dashboard
-dashboard: setup ## Start the web dashboard on http://127.0.0.1:8080
+dashboard: setup ## Start the web dashboard (EAGM_DASHBOARD_PORT, default 19080)
 	$(COMPOSE) up -d dashboard
-	@echo "Dashboard: http://127.0.0.1:8080"
+	@echo "Dashboard: http://127.0.0.1:$${EAGM_DASHBOARD_PORT:-19080}"
 	@test -n "$$EAGM_DASHBOARD_TOKEN" && \
 		echo "  token required — append ?token=$$EAGM_DASHBOARD_TOKEN" || true
 

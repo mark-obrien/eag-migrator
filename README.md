@@ -55,7 +55,7 @@ content — `db/*-seed/` and `state/` are gitignored for the same reason.
 Everything below can be driven from a browser instead:
 
 ```bash
-make dashboard             # http://127.0.0.1:8080
+make dashboard             # http://127.0.0.1:19080
 ```
 
 One page shows connection health, the v2 session, the harvest config, the
@@ -71,6 +71,10 @@ A few deliberate constraints:
 
 - **Localhost only.** Compose publishes the port on `127.0.0.1`. This UI holds
   a live session for a customer system and can write to v3.
+- **Port 19080, not 8080.** 8080 is the most contended port on a dev machine.
+  Set `EAGM_DASHBOARD_PORT` if 19080 clashes too — compose and the CLI both
+  read it. A clash is reported with a free port to use, rather than surfacing
+  as a traceback; `eagm dashboard --auto-port` just picks one.
 - **Set `EAGM_DASHBOARD_TOKEN`** if you expose it anywhere else; every page and
   action then requires it.
 - **Writing to v3 and rolling back need typing a confirmation word.** A stray
@@ -124,8 +128,10 @@ starts unless you ask for it:
 Set `COMPOSE_PROFILES=v2-mysql,v3-postgres` in `.env` to make `make up` do the
 right thing without repeating the flags.
 
-Local ports: v2-mysql `13306`, v2-postgres `15432`, v3-postgres `15433`,
-v3-mysql `13307`, adminer `18080`.
+Local ports, all bound to `127.0.0.1`: dashboard `19080`, v2-mysql `13306`,
+v3-mysql `13307`, v2-postgres `15432`, v3-postgres `15433`, adminer `18080`.
+Override the dashboard with `EAGM_DASHBOARD_PORT` and adminer with
+`ADMINER_PORT`.
 
 ---
 
@@ -515,7 +521,7 @@ the sink interface, so it stays reversible.
 
 | Command | Purpose |
 |---|---|
-| `eagm dashboard` | Serve the web dashboard (localhost:8080) |
+| `eagm dashboard` | Serve the web dashboard (localhost:19080) |
 | `eagm doctor` | Check both connections and show where state and config live |
 | `eagm login <url>` | Store an authenticated session for the v2 app |
 | `eagm recon <url>` | Inspect the live v2 site; detect a login wall |

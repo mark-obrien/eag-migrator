@@ -65,9 +65,12 @@ services:
     shm_size: 1gb
     # Published on the loopback interface only. This UI holds a session for a
     # live customer system and can write to v3 — it is not for a network.
+    # 8080 is the most contended port on a dev machine; this one is not a
+    # default for anything common. Change the host side with
+    # EAGM_DASHBOARD_PORT in .env.
     ports:
-      - "127.0.0.1:8080:8080"
-    entrypoint: ["eagm", "dashboard", "--host", "0.0.0.0", "--port", "8080"]
+      - "127.0.0.1:${EAGM_DASHBOARD_PORT:-19080}:19080"
+    entrypoint: ["eagm", "dashboard", "--host", "0.0.0.0", "--port", "19080"]
 
   # --- EAG v2 candidates ---------------------------------------------------
   v2-mysql:
@@ -149,8 +152,10 @@ services:
   adminer:
     profiles: ["tools"]
     image: adminer:4
+    # Loopback only: this reaches both databases, so it is no less sensitive
+    # than the dashboard.
     ports:
-      - "18080:8080"
+      - "127.0.0.1:${ADMINER_PORT:-18080}:8080"
 
 volumes:
   v2-mysql-data:
