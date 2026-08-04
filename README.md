@@ -3,27 +3,42 @@
 A dockerized migrator for moving Everything Auto Glass from the v2 site to v3.
 
 **It is built discovery-first**, because the schema is not known up front. You
-point it at the v2 database and it works out what is there: the tables, the
-keys, the foreign-key graph, even which framework generated the schema. Then it
-drafts the mapping for you. Nothing about EAG is hard-coded — the engine is
+point it at v2 — a database if you have credentials, otherwise the live website
+— and it works out what is there: the tables, the keys, the foreign-key graph,
+the framework that built it, and whether the site already publishes JSON. Then
+it drafts the mapping for you. Nothing about EAG is hard-coded; the engine is
 driven entirely by `config/mapping.yaml`.
 
 ---
+
+## Two ways in
+
+**If you can reach v2's database or API**, go to [Quick start](#quick-start).
+
+**If you cannot** — no credentials, no DB access, just the public website —
+read the site instead. See [No database, no API](#no-database-no-api). It
+harvests the live site into a local staging database, and from there the
+pipeline below is identical.
 
 ## What you need to supply
 
 The tool discovers the rest, but it cannot invent these:
 
-1. **A connection to v2** — a read-only user is enough and is what you want.
-   Alternatively a `.sql` dump dropped in `db/v2-seed/`, which the local v2
-   container loads on first boot.
+1. **A way to read v2** — a read-only database user, a `.sql` dump in
+   `db/v2-seed/`, or (failing both) the URL of the live site.
 2. **A connection to v3** — or its dump in `db/v3-seed/`, or a base URL if you
    would rather write through v3's HTTP API.
 3. **Answers to the questions the draft mapping asks.** Every guess it makes is
    marked `note: TODO`. Those are for whoever knows the business rules.
 
-Credentials go in `.env`, which is gitignored. Do not commit dumps — `db/*-seed/`
-is gitignored for the same reason.
+Credentials go in `.env`, which is gitignored. Do not commit dumps or harvested
+content — `db/*-seed/` and `state/` are gitignored for the same reason.
+
+> **Before harvesting a site you do not own**, get the owner's written
+> authorisation and check their terms of service. The tool obeys `robots.txt`,
+> honours `Crawl-delay`, rate-limits to 1 request/second by default, identifies
+> itself in the User-Agent, and caches every response so re-runs generate no
+> new traffic — but none of that is a substitute for permission.
 
 ---
 
@@ -69,6 +84,87 @@ right thing without repeating the flags.
 
 Local ports: v2-mysql `13306`, v2-postgres `15432`, v3-postgres `15433`,
 v3-mysql `13307`, adminer `18080`.
+
+---
+
+## No database, no API
+
+When the only thing you can reach is the public site, three commands stand in
+front of the normal pipeline:
+
+```bash
+eagm recon https://the-v2-site.example    # what is it? does it already expose JSON?
+eagm capture https://the-v2-site.example  # what does it call at runtime?
+# --- review config/harvest.draft.yaml, then: ---
+mv config/harvest.draft.yaml config/harvest.yaml
+eagm harvest                              # -> state/staging.sqlite
+
+# From here it is an ordinary v2 database:
+export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+eagm discover --side v2 && eagm scaffold && eagm plan && eagm run && eagm verify
+```
+
+### Scraping HTML is the last resort
+
+`recon` checks, in order of how much you would rather have it:
+
+1. **A JSON API.** WordPress publishes its entire content model at
+   `/wp-json/wp/v2` with no authentication — `recon` enumerates every post
+   type, reports the row count from `X-WP-Total`, and lists the fields. Shopify
+   publishes `/products.json`. Finding either turns a fragile scrape into a
+   clean, paginated, typed export.
+2. **JSON-LD.** Structured `schema.org` data already in the markup — business
+   name, phone, address, opening hours, services, reviews. It does not move
+   when the theme changes, so prefer it over CSS selectors.
+3. **Sitemaps**, for a complete URL inventory grouped into path patterns.
+4. **HTML selectors**, only if none of the above exist.
+
+It also fingerprints the platform (WordPress, Shopify, Wix, Squarespace,
+Webflow, Duda, Drupal, Magento, Next.js, and others) so you know what you are
+dealing with, and drafts `config/harvest.draft.yaml` from what it found.
+
+### `eagm capture` — analysing the site's network calls
+
+`recon` probes endpoints we guess at. `capture` drives a real Chromium, scrolls
+each page to trigger lazy loading, and records **what the site calls on its
+own** — the private JSON API behind a React front end, the store-locator feed,
+the quote calculator. It reports each endpoint with its response shape, item
+count and a sample, and writes a HAR you can open in devtools.
+
+This is usually how you find the good data on a site that looks unscrapeable.
+
+Chromium is not in the image by default (it adds several hundred MB):
+
+```bash
+make build-browser        # or: docker compose build --build-arg WITH_BROWSER=true
+make capture URL=https://the-v2-site.example
+```
+
+If you already have Chrome or Chromium somewhere, point `EAGM_CHROMIUM_PATH` at
+it and skip the rebuild.
+
+### Being a good citizen
+
+Every request goes through one client that obeys `robots.txt` (including
+`Crawl-delay`), rate-limits, identifies itself honestly, and **caches every
+response to disk**. Iterating on selectors costs the site nothing, because the
+second run reads from `state/webcache/`. A URL disallowed by `robots.txt` is
+never fetched, even if it appears in the sitemap.
+
+### The staging database
+
+`harvest` writes one table per collection into `state/staging.sqlite`, with the
+extracted fields as columns plus `_id` (pages and resumes), `_key`
+(deduplicates re-harvests), `_url` (the record's canonical permalink — this is
+your redirect map) and `_fetched_at`.
+
+Because it is a plain SQLite file, it *is* a v2 database. Everything downstream
+— discovery, scaffolding, transforms, dry run, resume, rollback, verification —
+works on it with no special cases. Re-running `harvest` updates rows in place
+rather than duplicating them.
+
+`config/harvest.example.yaml` is a worked example of all four discovery modes
+(`api`, `sitemap`, `crawl`, `static`).
 
 ---
 
@@ -234,6 +330,10 @@ the sink interface, so it stays reversible.
 | Command | Purpose |
 |---|---|
 | `eagm doctor` | Check both connections and show where state and config live |
+| `eagm recon <url>` | Inspect the live v2 site; draft a harvest config |
+| `eagm capture <url>` | Record the network calls the site makes (needs Chromium) |
+| `eagm harvest` | Pull the site into `state/staging.sqlite` |
+| `eagm staging` | Show what is in the staging database |
 | `eagm discover --side both` | Introspect and profile the databases |
 | `eagm scaffold` | Draft a mapping from the profiles |
 | `eagm show` | Validate the mapping and print the migration order |
@@ -257,13 +357,22 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-42 tests covering the transforms and the full pipeline — discover, scaffold,
-plan, run, verify, rollback — against fixture databases shaped like an auto
-glass shop (customers → vehicles → work orders, with the messy data you would
-expect: zero-dates, `$1,250.00`, `Y`/`N` flags, lowercase VINs, HTML in notes,
-a soft-deleted row and a row with no email).
+74 tests, in three groups:
 
-They run on SQLite so no containers are needed, but the engine itself is
+- **The database path** — transforms plus the full pipeline (discover,
+  scaffold, plan, run, verify, rollback) against fixture databases shaped like
+  an auto glass shop: customers → vehicles → work orders, with the messy data
+  you would expect (zero-dates, `$1,250.00`, `Y`/`N` flags, lowercase VINs,
+  HTML in notes, a soft-deleted row, a row with no email).
+- **The web path** — recon, drafting, extraction and harvesting against a fake
+  WordPress auto-glass site **served over real HTTP**, with a real
+  `robots.txt`, a real sitemap and real `X-WP-Total` pagination. Includes a
+  test that a `robots.txt`-disallowed URL in the sitemap is never fetched.
+- **Capture** — drives real Chromium against a client-rendered page and
+  asserts the XHR behind it is found. Skipped automatically when no browser is
+  available.
+
+The database tests run on SQLite so no containers are needed, but the engine is
 dialect-agnostic — all database access goes through SQLAlchemy.
 
 ---
@@ -272,9 +381,12 @@ dialect-agnostic — all database access goes through SQLAlchemy.
 
 ```
 config/mapping.yaml        the mapping — the only thing that knows about EAG
-profiles/                  discovered schemas (gitignored: contains real data)
-reports/                   plan/run/verify output (gitignored)
+config/harvest.yaml        what to pull off the live site (web path only)
+profiles/                  discovered schemas + site recon (gitignored: real data)
+reports/                   plan/run/verify/capture output (gitignored)
 state/migration.sqlite     checkpoints, id map, rollback journal (gitignored)
+state/staging.sqlite       harvested site content (gitignored)
+state/webcache/            cached HTTP responses (gitignored)
 db/v2-seed/, db/v3-seed/   drop .sql dumps here (gitignored)
 src/eag_migrator/
   discovery.py             schema introspection and fingerprinting
@@ -285,4 +397,12 @@ src/eag_migrator/
   verify.py                post-migration verification
   state.py                 checkpoints, id map, journal
   adapters/                SQL source, SQL sink, HTTP API sink
+  web/
+    fetcher.py             the polite HTTP client: robots, rate limit, cache
+    recon.py               platform fingerprinting and API discovery
+    capture.py             browser-driven network capture
+    draft.py               draft-harvest-config generator
+    extract.py             CSS / JSON-path / JSON-LD extraction
+    harvest.py             crawl and pull into staging
+    staging.py             the staging database
 ```

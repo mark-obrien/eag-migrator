@@ -1,0 +1,140 @@
+# ---------------------------------------------------------------------------
+# Example harvest config — how to read the v2 site when there is no database
+# and no API credentials.
+#
+# `eagm recon <url>` generates a draft of this from what it finds on the live
+# site. This example shows the finished article, with all four discovery modes.
+#
+# Copy to config/harvest.yaml to use it.
+# ---------------------------------------------------------------------------
+version: 1
+
+site:
+  base_url: https://example.com
+  rate_limit_rps: 1.0        # be polite; robots.txt Crawl-delay overrides this upward
+  respect_robots: true       # leave this on
+  max_pages: 2000
+
+collections:
+  # --- best case: the site already publishes JSON -------------------------
+  # WordPress exposes every content type at /wp-json/wp/v2/<type> with no
+  # authentication. No HTML parsing, no fragile selectors, proper pagination.
+  - name: services
+    key: id                  # dedupes re-harvests; defaults to the URL
+    discover:
+      api:
+        url: https://example.com/wp-json/wp/v2/services
+        per_page: 100
+        page_param: page
+        record_path: ""      # dotted path to the list; blank if the payload IS the list
+    extract:
+      type: json
+      fields:
+        - to: id
+          path: id
+        - to: slug
+          path: slug
+        - to: link           # becomes _url, which is what the redirect map needs
+          path: link
+        - to: title
+          path: title.rendered
+        - to: body_html
+          path: content.rendered
+        - to: published_at
+          path: date
+        # Custom/ACF fields — usually the data actually worth migrating.
+        - to: nags_prefix
+          path: acf.nags_prefix
+        - to: base_price
+          path: acf.base_price
+
+  # --- second best: server-rendered HTML, URLs from the sitemap -----------
+  - name: locations
+    discover:
+      sitemap:
+        match: "^/locations/"   # regex against each sitemap URL
+    extract:
+      type: html
+      fields:
+        - to: url
+          source: url
+        - to: title
+          selector: "h1"
+        - to: body_html
+          selector: ".entry-content"
+          attr: html
+        - to: images
+          selector: ".gallery img"
+          attr: src           # relative URLs are resolved against the page
+          many: true
+
+        # JSON-LD is structured data the site already publishes. Always prefer
+        # it over scraping the rendered markup — it does not move when the
+        # theme changes.
+        - to: phone
+          source: jsonld
+          path: telephone
+        - to: street
+          source: jsonld
+          path: address.streetAddress
+        - to: city
+          source: jsonld
+          path: address.addressLocality
+        - to: postal_code
+          source: jsonld
+          path: address.postalCode
+        - to: hours
+          source: jsonld
+          path: LocalBusiness.openingHoursSpecification   # scope by @type
+
+  # --- no sitemap: follow links from a starting page ----------------------
+  - name: blog
+    discover:
+      crawl:
+        start: /blog/
+        follow: "/blog/"      # which links to enqueue
+        keep: "/blog/[^/]+/$" # which URLs become records (defaults to `follow`)
+        max_depth: 3
+        limit: 500
+    extract:
+      type: html
+      fields:
+        - to: url
+          source: url
+        - to: title
+          selector: "h1"
+        - to: published
+          selector: "time"
+          attr: datetime
+        - to: body_html
+          selector: "article"
+          attr: html
+
+  # --- a known handful of pages -------------------------------------------
+  - name: corporate
+    discover:
+      static:
+        urls:
+          - /about/
+          - /contact/
+          - /warranty/
+    extract:
+      type: html
+      fields:
+        - to: url
+          source: url
+        - to: title
+          selector: "h1"
+        - to: body_html
+          selector: "main"
+          attr: html
+
+# After harvesting:
+#
+#   export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+#   eagm discover --side v2
+#   eagm scaffold
+#
+# The staging database is an ordinary v2 database from here on, so cleaning up
+# the scraped values is the mapping's job — `strip_html`, `phone`, `nags`,
+# `postal_code`, `to_datetime` and the rest all apply as normal.

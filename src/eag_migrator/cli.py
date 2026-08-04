@@ -487,6 +487,270 @@ def export_profile(
     console.print(f"[green]Wrote {dest}[/green]")
 
 
+# ---------------------------------------------------------------------------
+# Web source: when there is no database and no API access to v2.
+# ---------------------------------------------------------------------------
+
+HARVEST_CONFIG = CONFIG_DIR / "harvest.yaml"
+STAGING_DB = STATE_DIR / "staging.sqlite"
+WEB_CACHE = STATE_DIR / "webcache"
+
+
+@app.command()
+def recon(
+    url: str = typer.Argument(..., help="The v2 site, e.g. https://example.com"),
+    max_urls: int = typer.Option(3000, help="Cap on URLs read from sitemaps"),
+    rate: float = typer.Option(1.0, help="Requests per second"),
+    robots: bool = typer.Option(True, help="Obey robots.txt"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Ignore the on-disk cache"),
+    draft: bool = typer.Option(True, help="Also write a starting harvest config"),
+) -> None:
+    """Work out what the v2 site is and whether it already exposes JSON.
+
+    Scraping HTML is the last resort. This checks first for a REST API, a
+    products feed, sitemaps and JSON-LD — all of which beat parsing markup.
+    """
+    _settings()
+    from .web.fetcher import Fetcher
+    from .web.recon import recon as run_recon, render_markdown as render_recon
+
+    console.print(f"[bold]Recon:[/bold] {url}")
+    with Fetcher(
+        url,
+        cache_dir=WEB_CACHE,
+        rate_limit_rps=rate,
+        respect_robots=robots,
+        use_cache=not no_cache,
+    ) as fetcher:
+        profile = run_recon(fetcher, max_urls=max_urls)
+
+    save_json(profile.to_dict(), PROFILES_DIR / "site.json")
+    md = save_text(render_recon(profile), PROFILES_DIR / "site.md")
+
+    if profile.status and not 200 <= profile.status < 300:
+        console.print(f"[red]Homepage returned HTTP {profile.status}[/red]")
+
+    if profile.platforms:
+        console.print("  platform: " + ", ".join(p["platform"] for p in profile.platforms))
+    if profile.generator:
+        console.print(f"  generator: {profile.generator}")
+    console.print(f"  URLs discovered: {len(profile.urls):,}")
+
+    if profile.content_types:
+        table = Table(title="Content available as JSON", header_style="bold")
+        table.add_column("Type")
+        table.add_column("Rows", justify="right")
+        table.add_column("Accessible")
+        table.add_column("Endpoint", overflow="fold")
+        for ct in profile.content_types:
+            table.add_row(
+                ct.name,
+                f"{ct.total:,}" if ct.total is not None else "?",
+                "[green]yes[/green]" if ct.accessible else f"[yellow]{ct.note or 'no'}[/yellow]",
+                ct.rest_url,
+            )
+        console.print(table)
+    else:
+        console.print("[yellow]  no JSON API found by probing[/yellow]")
+
+    for note in profile.notes:
+        console.print(f"  • {note}")
+    console.print(f"\n[dim]report: {md}[/dim]")
+
+    if draft:
+        from .web.draft import draft_config
+        from .web.harvest import dump_config
+
+        config, warnings = draft_config(profile)
+        path = dump_config(config, CONFIG_DIR / "harvest.draft.yaml")
+        console.print(
+            f"[green]Drafted {len(config.collections)} collection(s) → {path}[/green]"
+        )
+        for warning in warnings:
+            console.print(f"  [yellow]•[/yellow] {warning}")
+        console.print(
+            f"\nReview it, then: [bold]mv {path} {HARVEST_CONFIG}[/bold] "
+            f"and run [bold]eagm harvest[/bold]"
+        )
+
+    console.print(
+        "\n[dim]If the site renders content client-side, run "
+        "`eagm capture <url>` to see the API it calls.[/dim]"
+    )
+
+
+@app.command()
+def capture(
+    url: str = typer.Argument(..., help="The v2 site"),
+    path: Optional[List[str]] = typer.Option(
+        None, "--path", help="Extra pages to drive (repeatable). Defaults to the homepage."
+    ),
+    har: bool = typer.Option(True, help="Also write a HAR file"),
+    scroll: bool = typer.Option(True, help="Scroll each page to trigger lazy loading"),
+    wait: int = typer.Option(2500, help="Milliseconds to idle on each page"),
+) -> None:
+    """Drive a real browser and record the network calls the site makes.
+
+    This is how you find the private JSON API behind a client-rendered site —
+    almost always a better migration source than the HTML it renders.
+    """
+    _settings()
+    from .web.capture import BrowserUnavailable, capture as run_capture
+    from .web.capture import render_markdown as render_capture
+
+    paths = list(path) if path else ["/"]
+    console.print(f"[bold]Capturing:[/bold] {url} ({len(paths)} page(s))")
+
+    try:
+        report = run_capture(
+            url,
+            paths,
+            har_path=(REPORTS_DIR / "capture.har") if har else None,
+            scroll=scroll,
+            wait_ms=wait,
+        )
+    except BrowserUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    save_json(report.to_dict(), REPORTS_DIR / "capture.json")
+    md = save_text(render_capture(report), REPORTS_DIR / "capture.md")
+
+    if report.api_calls:
+        table = Table(title="JSON endpoints the site calls", header_style="bold")
+        table.add_column("Method")
+        table.add_column("Endpoint", overflow="fold")
+        table.add_column("Items", justify="right")
+        table.add_column("Bytes", justify="right")
+        for call in report.api_calls:
+            table.add_row(
+                call.method,
+                call.pattern,
+                str(call.item_count) if call.item_count is not None else "—",
+                f"{call.size:,}",
+            )
+        console.print(table)
+    else:
+        console.print("[yellow]No JSON/XHR calls recorded.[/yellow]")
+
+    for note in report.notes:
+        console.print(f"  • {note}")
+    console.print(f"\n[dim]report: {md}[/dim]")
+    if report.har_path:
+        console.print(f"[dim]HAR:    {report.har_path}[/dim]")
+
+
+@app.command()
+def harvest(
+    config_file: Path = typer.Option(HARVEST_CONFIG, "--config", help="Harvest config"),
+    collections: Optional[List[str]] = typer.Option(
+        None, "--collection", help="Limit to these collections"
+    ),
+    limit: int = typer.Option(0, help="Stop after N records per collection (0 = all)"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Re-fetch instead of using the cache"),
+) -> None:
+    """Pull the v2 site into state/staging.sqlite.
+
+    Afterwards point V2_DATABASE_URL at that file and the rest of the migrator
+    works exactly as it does against a real database.
+    """
+    _settings()
+    from .web.harvest import harvest as run_harvest, load_config
+    from .web.harvest import render_markdown as render_harvest
+    from .web.staging import Staging
+
+    config = load_config(config_file)
+    console.print(
+        f"[bold]Harvesting[/bold] {config.site.base_url} "
+        f"at {config.site.rate_limit_rps}/s"
+        + ("" if config.site.respect_robots else " [yellow](ignoring robots.txt)[/yellow]")
+    )
+
+    def say(name: str, done: int, total: int) -> None:
+        console.print(f"[dim]  {name}: {done:,}/{total:,}[/dim]")
+
+    with Staging(STAGING_DB) as staging:
+        report = run_harvest(
+            config,
+            staging,
+            cache_dir=WEB_CACHE,
+            use_cache=not no_cache,
+            collections=list(collections) if collections else None,
+            limit=limit,
+            progress=say,
+        )
+
+    table = Table(title="Harvest", header_style="bold")
+    table.add_column("Collection")
+    table.add_column("Found", justify="right")
+    table.add_column("Fetched", justify="right")
+    table.add_column("Stored", justify="right")
+    table.add_column("Failed", justify="right")
+    for c in report.collections:
+        table.add_row(
+            c.name,
+            f"{c.discovered:,}",
+            f"{c.fetched:,}",
+            f"{c.stored:,}",
+            f"[red]{c.failed:,}[/red]" if c.failed else "0",
+        )
+    console.print(table)
+
+    for c in report.collections:
+        for note in c.notes:
+            console.print(f"  • [cyan]{c.name}[/cyan]: {note}")
+        for err in c.errors[:3]:
+            console.print(f"  [red]![/red] [cyan]{c.name}[/cyan] {err['url']}: {err['error']}")
+
+    console.print(
+        f"\n{report.requests_made:,} request(s) made, "
+        f"{report.cache_hits:,} served from cache"
+    )
+    md = save_text(render_harvest(report), REPORTS_DIR / "harvest.md")
+    console.print(f"[dim]report: {md}[/dim]")
+
+    console.print(
+        f"\nThe staging database is now your v2 source:\n"
+        f"  [bold]export V2_DATABASE_URL=sqlite:///{STAGING_DB}[/bold]\n"
+        f"  [bold]eagm discover --side v2 && eagm scaffold[/bold]"
+    )
+    raise typer.Exit(1 if report.total_failed else 0)
+
+
+@app.command()
+def staging(
+    sample: int = typer.Option(0, help="Show N sample rows per collection"),
+) -> None:
+    """Show what is currently in the staging database."""
+    _settings()
+    from .web.staging import Staging
+
+    if not STAGING_DB.exists():
+        console.print(f"[yellow]No staging database yet at {STAGING_DB}.[/yellow]")
+        console.print("Run `eagm recon <url>` then `eagm harvest`.")
+        raise typer.Exit(1)
+
+    with Staging(STAGING_DB) as store:
+        tables = store.tables()
+        if not tables:
+            console.print("[yellow]Staging database is empty.[/yellow]")
+            raise typer.Exit(1)
+
+        table = Table(title=f"Staging — {STAGING_DB}", header_style="bold")
+        table.add_column("Collection")
+        table.add_column("Rows", justify="right")
+        for name in tables:
+            table.add_row(name, f"{store.count(name):,}")
+        console.print(table)
+
+        if sample:
+            for name in tables:
+                console.print(f"\n[bold cyan]{name}[/bold cyan]")
+                console.print(json.dumps(store.sample(name, sample), indent=2, default=str)[:4000])
+
+    console.print(f"\n[dim]V2_DATABASE_URL=sqlite:///{STAGING_DB}[/dim]")
+
+
 @app.command(name="profile-summary")
 def profile_summary(side: str = typer.Argument("v2", help="v2 or v3")) -> None:
     """Print the headline facts from a stored profile."""

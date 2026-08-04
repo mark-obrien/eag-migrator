@@ -49,6 +49,30 @@ cli: ## Run any eagm command:  make cli CMD="plan --limit 100"
 doctor: ## Check both database connections
 	$(RUN) doctor
 
+# --- web source: no database, no API ---------------------------------------
+
+.PHONY: recon
+recon: ## Inspect the live v2 site:  make recon URL=https://example.com
+	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
+	$(RUN) recon $(URL)
+
+.PHONY: capture
+capture: ## Record the site's network calls (needs WITH_BROWSER=true at build)
+	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
+	$(RUN) capture $(URL)
+
+.PHONY: build-browser
+build-browser: setup ## Rebuild the image with Chromium, for `make capture`
+	WITH_BROWSER=true $(COMPOSE) build
+
+.PHONY: harvest
+harvest: ## Pull the site into state/staging.sqlite
+	$(RUN) harvest
+
+.PHONY: staging
+staging: ## Show what is in the staging database
+	$(RUN) staging
+
 .PHONY: discover
 discover: ## Introspect both databases into profiles/
 	$(RUN) discover --side both

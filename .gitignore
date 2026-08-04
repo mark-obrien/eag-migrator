@@ -8,6 +8,9 @@
 /profiles/*.md
 /reports/*
 /state/*
+# Harvested site content and the HTTP cache — the client's data, not ours.
+/state/staging.sqlite*
+/state/webcache/
 !**/.gitkeep
 
 # Database dumps — these are production data, keep them out of git
@@ -18,6 +21,7 @@
 
 # Generated mapping drafts (review, rename, then commit deliberately)
 /config/mapping.draft.yaml
+/config/harvest.draft.yaml
 
 # Python
 __pycache__/

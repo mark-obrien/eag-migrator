@@ -10,3 +10,9 @@ rich>=13.7
 httpx>=0.27
 tenacity>=8.3
 python-dotenv>=1.0.1
+# Web source: reading the v2 site over HTTP when there is no DB/API access.
+beautifulsoup4>=4.12
+lxml>=5.2
+# `eagm capture` only. The pip package is small; the browser binary is not
+# installed unless the image is built with --build-arg WITH_BROWSER=true.
+playwright>=1.44

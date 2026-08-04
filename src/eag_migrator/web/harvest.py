@@ -1,0 +1,498 @@
+"""Harvest: pull the v2 site into a local staging database.
+
+The staging database is the whole point. Once the site is in SQLite, it *is* a
+v2 database, and everything already built — mapping, transforms, plan, run,
+verify, rollback — works on it unchanged:
+
+    eagm harvest                                   # site  -> state/staging.sqlite
+    V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+    eagm discover --side v2 && eagm scaffold       # then the normal pipeline
+
+It also means the site gets read once. Every re-run of the mapping works off
+local data, not more traffic to someone else's server.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator, Literal
+from urllib.parse import urljoin, urlparse
+
+import yaml
+from bs4 import BeautifulSoup
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .extract import ExtractError, extract_html, extract_json, flatten, links_from
+from .fetcher import DEFAULT_UA, Fetcher
+from .staging import Staging
+
+
+# --- configuration ----------------------------------------------------------
+
+
+class FieldSpec(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    to: str
+    selector: str | None = None
+    """CSS selector, for `type: html`."""
+    path: str | None = None
+    """Dotted path, for `type: json` or `source: jsonld`."""
+    attr: str = "text"
+    """text | html | any HTML attribute name (href, src, content, ...)."""
+    many: bool = False
+    source: Literal["selector", "url", "jsonld"] = "selector"
+    const: Any = None
+    required: bool = False
+    note: str | None = None
+
+
+class SitemapDiscovery(BaseModel):
+    match: str
+    """Regex tested against each sitemap URL."""
+    limit: int | None = None
+
+
+class ApiDiscovery(BaseModel):
+    url: str
+    per_page: int = 100
+    page_param: str = "page"
+    per_page_param: str = "per_page"
+    max_pages: int = 100
+    record_path: str = ""
+    """Dotted path to the list inside the payload; blank if the payload is the list."""
+
+
+class CrawlDiscovery(BaseModel):
+    start: str
+    follow: str | None = None
+    """Regex: which links to enqueue."""
+    keep: str | None = None
+    """Regex: which URLs become records. Defaults to `follow`."""
+    max_depth: int = 3
+    limit: int = 500
+
+
+class UrlDiscovery(BaseModel):
+    urls: list[str]
+
+
+class Discovery(BaseModel):
+    sitemap: SitemapDiscovery | None = None
+    api: ApiDiscovery | None = None
+    crawl: CrawlDiscovery | None = None
+    static: UrlDiscovery | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> Discovery:
+        chosen = [n for n in ("sitemap", "api", "crawl", "static") if getattr(self, n)]
+        if len(chosen) != 1:
+            raise ValueError(
+                "discovery needs exactly one of: sitemap, api, crawl, static "
+                f"(got {chosen or 'none'})"
+            )
+        return self
+
+
+class Extract(BaseModel):
+    type: Literal["html", "json"] = "html"
+    fields: list[FieldSpec]
+
+
+class Collection(BaseModel):
+    name: str
+    enabled: bool = True
+    discover: Discovery
+    extract: Extract
+    key: str | None = None
+    """Field that uniquely identifies a record. Defaults to the URL."""
+    note: str | None = None
+
+
+class Site(BaseModel):
+    base_url: str
+    rate_limit_rps: float = 1.0
+    respect_robots: bool = True
+    user_agent: str = DEFAULT_UA
+    max_pages: int = 2000
+
+
+class HarvestConfig(BaseModel):
+    version: int = 1
+    site: Site
+    collections: list[Collection] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique(self) -> HarvestConfig:
+        seen: set[str] = set()
+        for c in self.collections:
+            if c.name in seen:
+                raise ValueError(f"duplicate collection name: {c.name}")
+            seen.add(c.name)
+        return self
+
+    def active(self) -> list[Collection]:
+        return [c for c in self.collections if c.enabled]
+
+
+def load_config(path: Path) -> HarvestConfig:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No harvest config at {path}. Run `eagm recon <url>` first — it writes "
+            f"a starting config based on what it finds."
+        )
+    return HarvestConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
+
+_FIELD_DEFAULTS = {"attr": "text", "many": False, "source": "selector", "required": False}
+
+
+def dump_config(config: HarvestConfig, path: Path) -> Path:
+    """Write the config, omitting field-level defaults.
+
+    A draft with 60 collections is unreadable if every field spells out
+    `attr: text`, `many: false`, `source: selector`, `required: false`.
+    """
+    data = config.model_dump(by_alias=True, exclude_none=True)
+    for collection in data.get("collections", []):
+        if collection.get("enabled") is True:
+            collection.pop("enabled")
+        for spec in collection.get("extract", {}).get("fields", []):
+            for key, default in _FIELD_DEFAULTS.items():
+                if spec.get(key) == default:
+                    spec.pop(key, None)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100),
+        encoding="utf-8",
+    )
+    return path
+
+
+# --- results ----------------------------------------------------------------
+
+
+@dataclass
+class CollectionResult:
+    name: str
+    discovered: int = 0
+    fetched: int = 0
+    stored: int = 0
+    failed: int = 0
+    from_cache: int = 0
+    errors: list[dict[str, str]] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    samples: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class HarvestReport:
+    base_url: str
+    started_at: str
+    finished_at: str | None = None
+    staging_path: str = ""
+    collections: list[CollectionResult] = field(default_factory=list)
+    requests_made: int = 0
+    cache_hits: int = 0
+    robots_blocked: int = 0
+
+    @property
+    def total_stored(self) -> int:
+        return sum(c.stored for c in self.collections)
+
+    @property
+    def total_failed(self) -> int:
+        return sum(c.failed for c in self.collections)
+
+
+# --- discovery --------------------------------------------------------------
+
+
+def _sitemap_urls(fetcher: Fetcher, limit: int) -> list[str]:
+    from .recon import _parse_sitemap  # local import: shared parser, avoids a cycle
+
+    declared = fetcher.sitemaps() or [
+        urljoin(fetcher.base_url + "/", "sitemap.xml"),
+        urljoin(fetcher.base_url + "/", "sitemap_index.xml"),
+    ]
+    urls: list[str] = []
+    queue, seen = list(declared), set()
+    while queue and len(urls) < limit and len(seen) < 60:
+        sm = queue.pop(0)
+        if sm in seen:
+            continue
+        seen.add(sm)
+        resp = fetcher.get(sm)
+        if not resp.ok:
+            continue
+        pages, nested = _parse_sitemap(resp.text)
+        urls.extend(pages)
+        queue.extend(nested)
+    return urls
+
+
+def _crawl_urls(fetcher: Fetcher, spec: CrawlDiscovery, cap: int) -> list[str]:
+    start = urljoin(fetcher.base_url + "/", spec.start.lstrip("/"))
+    keep = re.compile(spec.keep or spec.follow) if (spec.keep or spec.follow) else None
+
+    seen: set[str] = set()
+    kept: list[str] = []
+    queue: list[tuple[str, int]] = [(start, 0)]
+
+    while queue and len(kept) < min(spec.limit, cap):
+        url, depth = queue.pop(0)
+        if url in seen or depth > spec.max_depth:
+            continue
+        seen.add(url)
+
+        resp = fetcher.get(url)
+        if not resp.ok:
+            continue
+        if keep is None or keep.search(url):
+            kept.append(url)
+        if depth < spec.max_depth:
+            for link in links_from(resp.text, url, spec.follow):
+                if urlparse(link).netloc == urlparse(fetcher.origin).netloc and link not in seen:
+                    queue.append((link, depth + 1))
+    return kept
+
+
+def _api_records(fetcher: Fetcher, spec: ApiDiscovery, cap: int) -> Iterator[tuple[str, Any]]:
+    """Page through a JSON endpoint, yielding (source_url, record)."""
+    from .extract import _resolve_path
+
+    emitted = 0
+    for page in range(1, spec.max_pages + 1):
+        sep = "&" if "?" in spec.url else "?"
+        url = (
+            f"{spec.url}{sep}{spec.per_page_param}={spec.per_page}"
+            f"&{spec.page_param}={page}"
+        )
+        resp = fetcher.get(url)
+        if not resp.ok or not resp.is_json:
+            return
+        try:
+            payload = resp.json()
+        except ValueError:
+            return
+        records = _resolve_path(payload, spec.record_path) if spec.record_path else payload
+        if not isinstance(records, list) or not records:
+            return
+        for record in records:
+            yield resp.url, record
+            emitted += 1
+            if emitted >= cap:
+                return
+        if len(records) < spec.per_page:
+            return
+
+
+# --- the harvester ----------------------------------------------------------
+
+
+def harvest(
+    config: HarvestConfig,
+    staging: Staging,
+    *,
+    cache_dir: Path | None = None,
+    use_cache: bool = True,
+    collections: list[str] | None = None,
+    limit: int = 0,
+    progress: Any = None,
+) -> HarvestReport:
+    report = HarvestReport(
+        base_url=config.site.base_url,
+        started_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        staging_path=str(staging.path),
+    )
+    say = progress or (lambda *_: None)
+
+    with Fetcher(
+        config.site.base_url,
+        cache_dir=cache_dir,
+        user_agent=config.site.user_agent,
+        rate_limit_rps=config.site.rate_limit_rps,
+        respect_robots=config.site.respect_robots,
+        use_cache=use_cache,
+    ) as fetcher:
+        wanted = set(collections) if collections else None
+        for collection in config.active():
+            if wanted and collection.name not in wanted:
+                continue
+            result = _harvest_collection(
+                fetcher, collection, staging, config.site.max_pages, limit, say
+            )
+            report.collections.append(result)
+
+        report.requests_made = fetcher.stats.requests
+        report.cache_hits = fetcher.stats.cache_hits
+        report.robots_blocked = len(fetcher.stats.blocked_by_robots)
+
+    report.finished_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    return report
+
+
+def _harvest_collection(
+    fetcher: Fetcher,
+    collection: Collection,
+    staging: Staging,
+    max_pages: int,
+    limit: int,
+    say: Any,
+) -> CollectionResult:
+    result = CollectionResult(name=collection.name)
+    if collection.note:
+        result.notes.append(collection.note)
+
+    cap = limit or max_pages
+    columns = [f.to for f in collection.extract.fields]
+    staging.ensure_table(collection.name, columns)
+    rows: list[dict[str, Any]] = []
+
+    disc = collection.discover
+
+    # --- JSON API: no HTML parsing at all ----------------------------------
+    if disc.api:
+        for source_url, record in _api_records(fetcher, disc.api, cap):
+            result.discovered += 1
+            result.fetched += 1
+            try:
+                extracted = extract_json(record, collection.extract.fields, url=source_url)
+            except ExtractError as exc:
+                result.failed += 1
+                if len(result.errors) < 50:
+                    result.errors.append({"url": source_url, "error": str(exc)})
+                continue
+            rows.append(_finalise(extracted, collection, source_url))
+            if len(result.samples) < 3:
+                result.samples.append(dict(rows[-1]))
+        say(collection.name, result.fetched, result.discovered)
+        result.stored = staging.insert(collection.name, columns, rows)
+        return result
+
+    # --- URL-based: sitemap, crawl or a fixed list -------------------------
+    if disc.sitemap:
+        pattern = re.compile(disc.sitemap.match)
+        urls = [u for u in _sitemap_urls(fetcher, max_pages) if pattern.search(u)]
+        if disc.sitemap.limit:
+            urls = urls[: disc.sitemap.limit]
+        if not urls:
+            result.notes.append(
+                f"sitemap matched nothing for /{disc.sitemap.match}/ — check the "
+                f"pattern against the URL shapes in the recon report"
+            )
+    elif disc.crawl:
+        urls = _crawl_urls(fetcher, disc.crawl, cap)
+    else:
+        urls = [
+            urljoin(fetcher.base_url + "/", u.lstrip("/")) if not u.startswith("http") else u
+            for u in (disc.static.urls if disc.static else [])
+        ]
+
+    urls = urls[:cap]
+    result.discovered = len(urls)
+
+    for i, url in enumerate(urls, 1):
+        resp = fetcher.get(url)
+        if resp.from_cache:
+            result.from_cache += 1
+        if not resp.ok:
+            result.failed += 1
+            if len(result.errors) < 50:
+                result.errors.append({"url": url, "error": f"HTTP {resp.status}"})
+            continue
+        result.fetched += 1
+
+        try:
+            if collection.extract.type == "json":
+                extracted = extract_json(resp.json(), collection.extract.fields, url=url)
+            else:
+                extracted = extract_html(
+                    resp.text, url, collection.extract.fields, soup=BeautifulSoup(resp.text, "lxml")
+                )
+        except (ExtractError, ValueError) as exc:
+            result.failed += 1
+            if len(result.errors) < 50:
+                result.errors.append({"url": url, "error": str(exc)})
+            continue
+
+        rows.append(_finalise(extracted, collection, url))
+        if len(result.samples) < 3:
+            result.samples.append(dict(rows[-1]))
+        if i % 25 == 0:
+            say(collection.name, i, len(urls))
+
+    say(collection.name, result.fetched, result.discovered)
+    result.stored = staging.insert(collection.name, columns, rows)
+    return result
+
+
+CANONICAL_URL_FIELDS = ("link", "permalink", "url", "guid", "canonical_url")
+
+
+def _finalise(extracted: dict[str, Any], collection: Collection, url: str) -> dict[str, Any]:
+    row = {k: flatten(v) for k, v in extracted.items()}
+
+    # `_url` should be the page this record represents, not where we happened to
+    # fetch it. For an API collection the fetch URL is a paginated endpoint —
+    # useless for the redirect map, which is half the point of keeping the URL.
+    canonical = url
+    for name in CANONICAL_URL_FIELDS:
+        value = row.get(name)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            canonical = value
+            break
+
+    key = row.get(collection.key) if collection.key else None
+    row["_url"] = canonical
+    row["_key"] = str(key) if key not in (None, "") else canonical
+    row["_fetched_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    return row
+
+
+def render_markdown(report: HarvestReport) -> str:
+    lines = [f"# Harvest — {report.base_url}\n"]
+    lines.append(f"- Started: {report.started_at}")
+    lines.append(f"- Finished: {report.finished_at or '(incomplete)'}")
+    lines.append(f"- Staging database: `{report.staging_path}`")
+    lines.append(f"- Records stored: **{report.total_stored:,}**")
+    lines.append(f"- Requests made: {report.requests_made:,} "
+                 f"(+{report.cache_hits:,} served from cache)")
+    if report.robots_blocked:
+        lines.append(f"- Skipped by robots.txt: {report.robots_blocked}")
+    lines.append("")
+
+    lines.append("| Collection | Discovered | Fetched | Stored | Failed |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for c in report.collections:
+        lines.append(
+            f"| {c.name} | {c.discovered:,} | {c.fetched:,} | {c.stored:,} | {c.failed:,} |"
+        )
+    lines.append("")
+
+    for c in report.collections:
+        if c.notes:
+            lines.append(f"## {c.name} — notes\n")
+            for note in c.notes:
+                lines.append(f"- {note}")
+            lines.append("")
+        if c.errors:
+            lines.append(f"## {c.name} — failures ({c.failed:,} total)\n")
+            lines.append("| URL | Error |")
+            lines.append("|---|---|")
+            for err in c.errors[:50]:
+                lines.append(f"| {err['url']} | {err['error']} |")
+            lines.append("")
+
+    lines.append("## Next step\n")
+    lines.append("The staging database is now a v2 database. Point the migrator at it:\n")
+    lines.append("```bash")
+    lines.append(f"export V2_DATABASE_URL=sqlite:///{report.staging_path}")
+    lines.append("eagm discover --side v2")
+    lines.append("eagm scaffold")
+    lines.append("```")
+    return "\n".join(lines)

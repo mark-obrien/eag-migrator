@@ -17,7 +17,11 @@ name: eag-migrator
 
 services:
   migrator:
-    build: .
+    build:
+      context: .
+      args:
+        # true also installs Chromium, needed only by `eagm capture`.
+        WITH_BROWSER: "${WITH_BROWSER:-false}"
     # Optional so a missing .env fails with `eagm doctor` telling you exactly
     # what to set, rather than a cryptic compose stat error. `make setup`
     # creates it for you.

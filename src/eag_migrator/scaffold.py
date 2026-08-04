@@ -29,6 +29,10 @@ NOISE = re.compile(
 
 MATCH_THRESHOLD = 0.62
 
+# Columns the web harvester adds to every staging table. Their presence means
+# the "primary key" is a scraper row number, not the source system's id.
+STAGING_MARKERS = {"_id", "_key", "_url", "_fetched_at"}
+
 # Target columns that exist to hold the old system's primary key.
 LEGACY_ID = re.compile(
     r"^(legacy|old|external|source|import|v2|prev(ious)?)_?(id|key|ref)$"
@@ -252,46 +256,62 @@ def build_draft(
         fields: list[FieldMap] = []
         used_targets: set[str] = set()
 
-        # Where should the v2 primary key go? Never onto a generated v3 key —
-        # that would carry v2 ids into v3, collide with rows already there, and
-        # defeat the whole point of remapping. Prefer a legacy-id column.
-        legacy_col = None
-        for cand in tgt_cols.values():
-            if LEGACY_ID.search(cand.name) and cand.name not in used_targets:
-                legacy_col = cand.name
-                break
+        target_key = "id"
+        if tgt_profile and tgt_profile.primary_key:
+            target_key = tgt_profile.primary_key[0]
+
+        # Never let a source column land on a generated v3 key — that would
+        # carry v2 ids into v3, collide with rows already there, and defeat the
+        # remapping. Claim it up front so nothing can match it.
+        tgt_key_col = tgt_cols.get(target_key)
+        key_is_generated = tgt_key_col is not None and _is_generated_key(tgt_key_col, tgt_profile)
+        if key_is_generated:
+            used_targets.add(tgt_key_col.name)
+
+        # Which source column carries the old system's identity? Normally the
+        # primary key — but a harvested staging table's `_id` is just a row
+        # number the scraper assigned. The real identity is the upstream `id`,
+        # or the `_key` the harvester deduplicates on.
+        source_names = {c.name for c in table.columns}
+        legacy_source = key
+        if STAGING_MARKERS <= source_names:
+            legacy_source = "id" if "id" in source_names else "_key"
+
+        legacy_col = next(
+            (c.name for c in tgt_cols.values() if LEGACY_ID.search(c.name)), None
+        )
+
+        if key_is_generated:
+            src_col = next((c for c in table.columns if c.name == legacy_source), None)
+            if legacy_col and src_col is not None:
+                used_targets.add(legacy_col)
+                fields.append(
+                    FieldMap(
+                        to=legacy_col,
+                        **{"from": legacy_source},
+                        transform=_infer_transforms(src_col, tgt_cols.get(legacy_col)),
+                        note=(
+                            f"v2 identity preserved here; v3 generates its own "
+                            f"'{target_key}'."
+                        ),
+                    )
+                )
+            elif src_col is not None:
+                notes.append(
+                    f"TODO: v3 generates '{target_key}', so the v2 identity "
+                    f"'{legacy_source}' is not carried over and no legacy-id column "
+                    f"exists to hold it. The id map records the pairing, but v3 "
+                    f"rows will have no trace of their v2 id — add a column if "
+                    f"you need that lineage."
+                )
+                warnings.append(
+                    f"{table.name}: v2 identity '{legacy_source}' has nowhere to land "
+                    f"in '{target_table}'"
+                )
 
         for col in table.columns:
-            if col.name == key and tgt_cols:
-                tgt_key = tgt_cols.get(_best(_norm(col.name), tgt_index)[0] or "")
-                if tgt_key is not None and _is_generated_key(tgt_key, tgt_profile):
-                    if legacy_col:
-                        used_targets.add(legacy_col)
-                        fields.append(
-                            FieldMap(
-                                to=legacy_col,
-                                **{"from": col.name},
-                                transform=["int"] if "int" in col.type.lower() else [],
-                                note=(
-                                    "v2 primary key preserved here; v3 generates its own "
-                                    f"'{tgt_key.name}'."
-                                ),
-                            )
-                        )
-                    else:
-                        notes.append(
-                            f"TODO: v3 generates '{tgt_key.name}', so the v2 key "
-                            f"'{col.name}' is not carried over and no legacy-id column "
-                            f"exists to hold it. The id map records the pairing, but v3 "
-                            f"rows will have no trace of their v2 id — add a column if "
-                            f"you need that lineage."
-                        )
-                        warnings.append(
-                            f"{table.name}: v2 key '{col.name}' has nowhere to land in "
-                            f"'{target_table}'"
-                        )
-                    used_targets.add(tgt_key.name)
-                    continue
+            if key_is_generated and col.name == legacy_source:
+                continue  # already routed to the legacy column above
 
             target_col, col_score = (None, 0.0)
             if tgt_index:
@@ -358,10 +378,6 @@ def build_draft(
                     f"{table.name}: unmapped NOT NULL target columns: "
                     f"{', '.join(unmapped_required)}"
                 )
-
-        target_key = "id"
-        if tgt_profile and tgt_profile.primary_key:
-            target_key = tgt_profile.primary_key[0]
 
         if is_noise:
             notes.append("framework plumbing — disabled by default; enable if you need it")

@@ -21,6 +21,13 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 RUN pip install --no-deps -e .
 
+# `eagm capture` drives a real browser. Chromium adds several hundred MB, so it
+# is opt-in: docker compose build --build-arg WITH_BROWSER=true
+ARG WITH_BROWSER=false
+RUN if [ "$WITH_BROWSER" = "true" ]; then \
+        playwright install --with-deps chromium; \
+    fi
+
 # Mounted as volumes by docker-compose so output survives the container.
 RUN mkdir -p /app/profiles /app/reports /app/state /app/config
 
