@@ -253,7 +253,7 @@ def draft_from_capture(report: Any, base_url: str) -> tuple[HarvestConfig, list[
 
 
 def draft_from_pages(
-    pages: list[tuple[str, str]], base_url: str
+    pages: list[tuple[str, str]], base_url: str, *, assist: bool = False
 ) -> tuple[HarvestConfig, list[str]]:
     """Build a harvest config from the markup of list screens.
 
@@ -267,7 +267,7 @@ def draft_from_pages(
     seen: set[str] = set()
 
     for url, html in pages:
-        found = propose(html, url)
+        found = propose(html, url, assist=assist)
         if not found:
             warnings.append(
                 f"{url}: no repeated structure found — either it is a detail page "

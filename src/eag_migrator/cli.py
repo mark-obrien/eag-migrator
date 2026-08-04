@@ -867,7 +867,9 @@ def capture(
         _draft_from_html(url, report.pages_visited, session)
 
 
-def _draft_from_html(base_url: str, urls: list[str], session) -> None:
+def _draft_from_html(
+    base_url: str, urls: list[str], session, assist: bool = False
+) -> None:
     """Fetch these screens and turn their repeated markup into a harvest config."""
     from .web.draft import draft_from_pages
     from .web.fetcher import Fetcher
@@ -888,7 +890,7 @@ def _draft_from_html(base_url: str, urls: list[str], session) -> None:
         console.print("[red]None of those pages could be read.[/red]")
         raise typer.Exit(1)
 
-    config, warnings = draft_from_pages(pages, base_url)
+    config, warnings = draft_from_pages(pages, base_url, assist=assist)
     path_out = dump_config(config, CONFIG_DIR / "harvest.draft.yaml")
 
     if config.collections:
@@ -924,25 +926,36 @@ def draft_html(
         None, "--also", help="Another list screen (repeatable)"
     ),
     anonymous: bool = typer.Option(False, "--anonymous", help="Ignore any stored session"),
+    assist: bool = typer.Option(
+        False, "--assist",
+        help="Also ask a model to read the page structure (needs ANTHROPIC_API_KEY)",
+    ),
 ) -> None:
     """Read a server-rendered list screen and draft the selectors to harvest it.
 
     For a v2 with no JSON API: point this at each list screen and it works out
     the repeated element, one field per column, the row id and the next-page
     link. No browser needed — this is plain HTTP.
+
+    `--assist` adds a model to the drafting step only, for markup the built-in
+    heuristics read badly. One call per screen, never per record. Every text
+    value and data-carrying attribute is stripped before the request is built,
+    so no customer data leaves the machine, and its selectors are run against
+    the page before being kept.
     """
     _settings()
     session = None if anonymous else _load_session(url)
     console.print(
         f"[bold]Reading:[/bold] {url}"
         + (" [green]authenticated[/green]" if session else " [yellow]anonymous[/yellow]")
+        + (" [cyan]+model[/cyan]" if assist else "")
     )
     if not session and not anonymous:
         console.print(
             "[dim]No session stored — if the app needs a login you will get the "
             "login page. Run `eagm login` first.[/dim]"
         )
-    _draft_from_html(url, [url, *(also or [])], session)
+    _draft_from_html(url, [url, *(also or [])], session, assist=assist)
 
 
 @app.command()

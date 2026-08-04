@@ -283,6 +283,8 @@ def build_status() -> dict[str, Any]:
         ],
         "api_sink": bool(settings.v3_api_base_url),
         "browser": browser_state(),
+        # Never the key itself, only whether there is one.
+        "assist": {"available": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip())},
     }
 
 
@@ -837,7 +839,9 @@ def create_app() -> FastAPI:
 
         return _launch(request, "capture", "Capture network calls", work)
 
-    def _draft_html(job: Any, base_url: str, urls: list[str], session: Any) -> int:
+    def _draft_html(
+        job: Any, base_url: str, urls: list[str], session: Any, assist: bool = False
+    ) -> int:
         """Turn the repeated markup on each list screen into a harvest config."""
         from ..web.draft import draft_from_pages
         from ..web.fetcher import Fetcher
@@ -853,7 +857,7 @@ def create_app() -> FastAPI:
                 else:
                     job.say(f"  · {_safe_url(one)}: HTTP {resp.status}, skipped")
 
-        config, warnings = draft_from_pages(pages, base_url)
+        config, warnings = draft_from_pages(pages, base_url, assist=assist)
         dump_config(config, HARVEST_DRAFT)
         for collection in config.collections:
             job.say(
@@ -868,7 +872,10 @@ def create_app() -> FastAPI:
 
     @app.post("/actions/draft-html", dependencies=[Depends(require_token)])
     def action_draft_html(
-        request: Request, url: str = Form(...), paths: str = Form("")
+        request: Request,
+        url: str = Form(...),
+        paths: str = Form(""),
+        assist: str = Form(""),
     ) -> Any:
         def work(job: Any) -> dict[str, Any]:
             from ..web.session import Session
@@ -878,8 +885,9 @@ def create_app() -> FastAPI:
             job.say(
                 f"reading {1 + len(extra)} screen(s)"
                 f"{' (authenticated)' if session else ' anonymously'}"
+                f"{', with a model reading the structure' if assist else ''}"
             )
-            drafted = _draft_html(job, url, [url, *extra], session)
+            drafted = _draft_html(job, url, [url, *extra], session, bool(assist))
             if not drafted:
                 job.say("nothing repeated found — are those list screens?")
             return {"collections": drafted}

@@ -166,6 +166,22 @@
       <div class="muted">For a v2 that renders on the server. Works out the
         repeated row, a field per column, the row id and the next-page link.
         No browser needed.</div>
+      <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
+        <input type="checkbox" name="assist" value="1" style="width:auto"
+               {% if not s.assist.available %}disabled{% endif %}>
+        Let a model read the structure too
+      </label>
+      <div class="muted">
+        {%- if s.assist.available %}
+          One call per screen, never per record. Every value is stripped before
+          the request — the model sees <code>&lt;td class="email"&gt;EMAIL&lt;/td&gt;</code>,
+          never an address — and its selectors are run against the page before
+          being kept.
+        {%- else %}
+          Needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>. Without it
+          the built-in heuristics are used.
+        {%- endif %}
+      </div>
       <div class="actions"><button>Draft from HTML</button></div>
     </form>
 

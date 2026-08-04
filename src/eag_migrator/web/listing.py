@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -55,6 +56,8 @@ class Proposal:
     rows: str                    # CSS selector for the repeated element
     fields: list[FieldSpec]
     row_count: int
+    filled: int = 0
+    """Fields confirmed to produce a value on most rows of the page it came from."""
     key: str | None = None
     next_url: str | None = None
     follow: str | None = None
@@ -295,8 +298,135 @@ def follow_pattern(url: str, next_url: str | None) -> str | None:
     return re.escape(path) + r"/?($|\?)"
 
 
-def propose(html: str, url: str) -> Proposal | None:
-    """The best repeated structure on the page, or None if there isn't one."""
+def measure(rows: str, fields: list[FieldSpec], html: str, url: str) -> tuple[int, int]:
+    """Run a proposal against the page: (rows matched, fields that filled).
+
+    Nothing is trusted on the strength of where it came from. A selector either
+    produces values on this page or it does not, and that is cheap to check.
+    """
+    from .extract import ExtractError, extract_html, select_rows
+
+    doc = BeautifulSoup(html, "lxml")
+    try:
+        elements = select_rows(html, rows, doc)
+    except ExtractError:
+        return (0, 0)
+    if not elements:
+        return (0, 0)
+
+    filled: dict[str, int] = {}
+    for element in elements:
+        try:
+            got = extract_html(html, url, fields, soup=doc, node=element)
+        except ExtractError:
+            return (len(elements), 0)
+        for name, value in got.items():
+            if value not in (None, "", [], {}):
+                filled[name] = filled.get(name, 0) + 1
+
+    # A field that works on one row of fifty is a coincidence, not a field.
+    threshold = max(1, len(elements) // 2)
+    return (len(elements), sum(1 for n in filled.values() if n >= threshold))
+
+
+def _from_model(answer: dict[str, Any], html: str, url: str) -> Proposal | None:
+    """Turn the model's answer into a Proposal, or None if it does not hold up."""
+    if not answer.get("is_list") or not answer.get("rows"):
+        return None
+
+    fields: list[FieldSpec] = []
+    seen: set[str] = set()
+    for raw in answer.get("fields") or []:
+        name = _ident(str(raw.get("to") or ""))
+        selector = str(raw.get("selector") or "").strip()
+        if not name or not selector or name in seen:
+            continue
+        seen.add(name)
+        fields.append(
+            FieldSpec(
+                to=name,
+                selector=selector,
+                attr=str(raw.get("attr") or "text").strip() or "text",
+                note=raw.get("note") or None,
+            )
+        )
+    if not fields:
+        return None
+
+    rows = str(answer["rows"]).strip()
+    matched, filled = measure(rows, fields, html, url)
+    if matched < 1 or filled < 2:
+        return None
+
+    key = _ident(str(answer.get("key") or "")) or None
+    if key and key not in seen:
+        key = None
+
+    notes = ["Selectors proposed by the model from the page structure, then run "
+             "against the page to confirm they produce values."]
+    if answer.get("reasoning"):
+        notes.append(str(answer["reasoning"]))
+
+    return Proposal(
+        kind="model",
+        rows=rows,
+        fields=fields,
+        row_count=matched,
+        filled=filled,
+        key=key,
+        notes=notes,
+    )
+
+
+def propose(html: str, url: str, *, assist: bool = False) -> Proposal | None:
+    """The best repeated structure on the page, or None if there isn't one.
+
+    With `assist`, a model reads the page's structure too and its proposal is
+    used only if it actually extracts more than the heuristics do.
+    """
+    found = _propose_heuristic(html, url)
+    if not assist:
+        return found
+
+    from .assist import AssistFailed, AssistUnavailable, ask
+
+    try:
+        answer = ask(html, url)
+        suggested = _from_model(answer, html, url)
+    except (AssistUnavailable, AssistFailed) as exc:
+        if found:
+            found.notes.append(f"The model was not used: {exc}")
+            return found
+        raise
+
+    if suggested is None:
+        if found:
+            found.notes.append(
+                "The model's selectors did not hold up against the page, so the "
+                "built-in heuristics were used instead."
+            )
+        return found
+
+    if found is not None:
+        # Both sides scored the same way: fields that actually produce a value
+        # on this page. A draw goes to the heuristics — they cost nothing and
+        # give the same answer every run.
+        mine = measure(found.rows, found.fields, html, url)
+        theirs = (suggested.row_count, suggested.filled)
+        if mine[1] > theirs[1] or (mine[1] == theirs[1] and mine[0] >= theirs[0]):
+            found.notes.append(
+                f"The model proposed {theirs[1]} usable field(s) over {theirs[0]} "
+                f"row(s); the built-in heuristics found {mine[1]} over {mine[0]}, "
+                f"so those were kept."
+            )
+            return found
+
+    suggested.next_url = find_next_page(html, url)
+    suggested.follow = follow_pattern(url, suggested.next_url)
+    return suggested
+
+
+def _propose_heuristic(html: str, url: str) -> Proposal | None:
     doc = BeautifulSoup(html, "lxml")
     candidates: list[Proposal] = []
 

@@ -300,6 +300,50 @@ The crawler that walks the pagination has the same refusals as `--explore`: no
 "Delete", no "Refund", no "Log out", nothing carrying `data-method` or a
 confirmation prompt. Each refusal is reported on the collection.
 
+#### Letting a model read the markup
+
+The drafter above is heuristics. It handles tables and obvious card lists, and
+does badly on nested `<div>` soup with no useful classes. `--assist` (a
+checkbox in the dashboard) adds a model to **that step only**:
+
+```bash
+make cli CMD="draft-html https://app.example.com/customers --assist"
+```
+
+Three properties make this safe to point at a payments system:
+
+**No page content leaves the machine.** The request is built from a skeleton,
+not the page. Every text node becomes a type placeholder and every
+data-carrying attribute is masked *before* the request exists, so the model
+sees
+
+```html
+<tr class="customer" data-id="NUM(4)">
+  <td class="email">EMAIL</td>
+  <td class="total">MONEY</td>
+```
+
+and never a name, an address, a VIN or a card number. Shape is the entire
+question, and the values were only ever noise. Repeated rows are collapsed to
+the first three, `<script>` blocks and prose-carrying attributes like `title=`
+are dropped whole, and digits in `href`s are masked so `/customers/5001`
+arrives as `/customers/0000`.
+
+**One call per screen, never per record.** Bulk extraction stays CSS
+selectors. Resume, verify and rollback all assume the same page gives the same
+rows every run, and a model reading 5,000 pages does not — you would find out
+during `verify`, unable to tell whether v3 was wrong or the scrape was.
+
+**Its answer is run, not trusted.** The proposed selectors are executed
+against the page and scored by how many fields actually produce a value on
+most rows. The heuristics are scored the same way, and the better one wins —
+a draw goes to the heuristics, because they cost nothing and never drift.
+Selectors that match nothing, invalid CSS, an API failure and a missing key
+all fall back rather than stopping, and the draft says which was used and why.
+
+Needs `ANTHROPIC_API_KEY` in `.env`. Without it nothing calls out, and
+`--assist` is the only thing that ever would.
+
 #### Authentication
 
 Three ways, in order of preference:
@@ -652,7 +696,7 @@ the sink interface, so it stays reversible.
 | `eagm login <url>` | Store an authenticated session for the v2 app |
 | `eagm recon <url>` | Inspect the live v2 site; detect a login wall |
 | `eagm capture <url>` | Record the app's own API calls and draft a harvest config |
-| `eagm draft-html <url>` | Read a server-rendered list screen and draft its selectors |
+| `eagm draft-html <url>` | Read a server-rendered list screen and draft its selectors (`--assist` to add a model) |
 | `eagm harvest` | Pull the site into `state/staging.sqlite` |
 | `eagm staging` | Show what is in the staging database |
 | `eagm discover --side both` | Introspect and profile the databases |
@@ -681,7 +725,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-164 tests, in five groups:
+180 tests, in six groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -707,6 +751,14 @@ make test-local    # on the host
   an explore pass over a fixture app whose navigation contains Delete, Refund,
   Email and Log out links, asserting it finds every real screen and touches
   none of those. Skipped automatically when no browser is available.
+- **Model-assisted drafting** — that no page content can reach the API: a
+  fixture page carrying names, emails, phone numbers, VINs, an amount, an
+  inline `<script>` holding a token and a bare PAN, asserted absent from the
+  skeleton value by value. Plus the rest of the contract, with the call
+  stubbed: selectors that match nothing, invalid CSS, a detail page, an API
+  failure and a thinner answer all fall back to the heuristics; the model wins
+  only on markup the heuristics genuinely cannot read; and nothing calls out
+  at all without `--assist`.
 - **The dashboard** — the live log (streaming, surviving completion, written
   to disk, and offsets that stay correct once the in-memory tail is trimmed),
   plus what would actually hurt: that a supplied password never reaches the
@@ -753,6 +805,7 @@ src/eag_migrator/
     capture.py             browser-driven network capture
     draft.py               draft-harvest-config generator
     listing.py             reads a list screen's markup into row selectors
+    assist.py              optional: a model reads the structure (values stripped)
     extract.py             CSS / JSON-path / JSON-LD extraction
     harvest.py             crawl and pull into staging
     staging.py             the staging database
