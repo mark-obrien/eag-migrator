@@ -1,6 +1,8 @@
 # EAG v2 → v3 migrator
 
-A dockerized migrator for moving Everything Auto Glass from the v2 site to v3.
+A dockerized migrator for moving a shop from the Everything Auto Glass v2
+platform to v3 — one tenant at a time
+(`<shop>.everythingautoglass.com` → `<shop>.eagsoftware.com`).
 
 **It is built discovery-first**, because the schema is not known up front. You
 point it at v2 — a database if you have credentials, otherwise the live website
@@ -108,7 +110,7 @@ If anything goes wrong: `make cli CMD="rollback <run-id>"`.
 
 ### Which profile?
 
-You did not know which engine EAG runs on, so both are defined and neither
+The engine v2 runs on is not known up front, so both are defined and neither
 starts unless you ask for it:
 
 | You need | Command |
@@ -312,7 +314,7 @@ rather than duplicating them.
 
 ## The workflow in detail
 
-### 1. `eagm discover` — find out what EAG actually is
+### 1. `eagm discover` — find out what v2 actually is
 
 Introspects a live database and writes two files per side:
 
@@ -530,6 +532,9 @@ the sink interface, so it stays reversible.
 | `eagm runs` | List previous runs |
 | `eagm errors <run-id>` | What went wrong, grouped by cause |
 | `eagm transforms` | List available transforms |
+| `eagm export-profile <side>` | Re-render a stored schema profile as markdown |
+| `eagm profile-summary <side>` | Headline facts from a stored profile |
+| `eagm version` | Print the version |
 
 Run any of them with `make cli CMD="..."`, or `make shell` for a prompt inside
 the container.
