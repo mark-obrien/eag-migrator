@@ -194,28 +194,34 @@ def _harvest_status() -> dict[str, Any]:
     if not HARVEST_FILE.exists():
         return {"present": False, "draft": HARVEST_DRAFT.exists()}
     try:
-        from ..web.harvest import load_config
+        from ..web.harvest import DISCOVERY_KINDS, load_config
 
         config = load_config(HARVEST_FILE)
+        return {
+            "present": True,
+            "valid": True,
+            "base_url": config.site.base_url,
+            "requires_auth": config.site.requires_auth,
+            "collections": [
+                {
+                    "name": c.name,
+                    # Read the kinds from the model rather than a list here, so
+                    # a new discovery type cannot take the whole page down.
+                    "kind": next(
+                        (k for k in DISCOVERY_KINDS if getattr(c.discover, k, None)),
+                        "unknown",
+                    ),
+                    "fields": len(c.extract.fields),
+                    "rows": bool(c.extract.rows),
+                }
+                for c in config.active()
+            ],
+        }
+    # Reading a config file must never take the dashboard down: this runs on
+    # every page and on the status poll, so an exception here is a blank UI
+    # with the reason only in the container log.
     except Exception as exc:  # noqa: BLE001
-        return {"present": True, "valid": False, "message": str(exc)}
-    return {
-        "present": True,
-        "valid": True,
-        "base_url": config.site.base_url,
-        "requires_auth": config.site.requires_auth,
-        "collections": [
-            {
-                "name": c.name,
-                "kind": next(
-                    k for k in ("api", "sitemap", "crawl", "static")
-                    if getattr(c.discover, k)
-                ),
-                "fields": len(c.extract.fields),
-            }
-            for c in config.active()
-        ],
-    }
+        return {"present": True, "valid": False, "message": f"{type(exc).__name__}: {exc}"}
 
 
 _BROWSER_CACHE: dict[str, Any] = {}

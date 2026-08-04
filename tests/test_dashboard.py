@@ -462,6 +462,70 @@ def test_a_failed_sign_in_is_reported_without_the_password(workspace, monkeypatc
     assert not dash.SESSION_FILE.exists()
 
 
+DISCOVERY_EXAMPLES = {
+    "api": {"api": {"url": "https://v2.example/api/items"}},
+    "sitemap": {"sitemap": {"match": "/x/"}},
+    "crawl": {"crawl": {"start": "/x"}},
+    "static": {"static": {"urls": ["/x"]}},
+    "sequence": {"sequence": {"url": "/x/{n}"}},
+}
+
+
+def test_every_discovery_kind_is_covered_below():
+    """Parametrising over the examples cannot catch a kind nobody listed."""
+    from eag_migrator.web.harvest import DISCOVERY_KINDS
+
+    assert set(DISCOVERY_KINDS) == set(DISCOVERY_EXAMPLES)
+
+
+@pytest.mark.parametrize("kind", sorted(DISCOVERY_EXAMPLES))
+def test_the_status_page_survives_every_discovery_kind(workspace, client, kind):
+    """A new discovery type must not be able to take the dashboard down.
+
+    `sequence:` did exactly that: the status reader picked the kind with a
+    next() over a hardcoded list, so a config it did not know about raised
+    StopIteration and every page 500'd.
+    """
+    import yaml
+
+    from eag_migrator.web.harvest import DISCOVERY_KINDS
+
+    assert kind in DISCOVERY_KINDS, "an example is missing for a discovery kind"
+
+    dash.HARVEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    dash.HARVEST_FILE.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "site": {"base_url": "https://v2.example"},
+                "collections": [
+                    {
+                        "name": "things",
+                        "discover": DISCOVERY_EXAMPLES[kind],
+                        "extract": {"fields": [{"to": "title", "selector": "h1"}]},
+                    }
+                ],
+            }
+        )
+    )
+
+    body = client.get("/api/status").json()
+    assert body["harvest"]["valid"] is True, body["harvest"]
+    assert body["harvest"]["collections"][0]["kind"] == kind
+    assert client.get("/").status_code == 200
+
+
+def test_a_broken_harvest_config_is_reported_not_a_500(workspace, client):
+    dash.HARVEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    dash.HARVEST_FILE.write_text("collections: [{name: oops}]\n")
+
+    body = client.get("/api/status").json()
+    assert body["harvest"]["present"] is True
+    assert body["harvest"]["valid"] is False
+    assert body["harvest"]["message"]
+    assert client.get("/").status_code == 200
+
+
 def test_draft_html_reads_a_list_screen_and_writes_a_config(workspace, monkeypatch):
     """The no-API path has to be reachable from the dashboard, not just the CLI."""
     import eag_migrator.dashboard.app as dashmod

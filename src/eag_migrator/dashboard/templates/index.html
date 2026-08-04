@@ -204,7 +204,8 @@
       <h3>Collections</h3>
       {% for c in s.harvest.collections %}
         <div class="row"><span>{{ c.name }}</span>
-          <span class="muted">{{ c.kind }} · {{ c.fields }} fields</span></div>
+          <span class="muted">{{ c.kind }} · {{ c.fields }} fields{% if c.rows %}
+            · rows{% endif %}</span></div>
       {% endfor %}
     {% elif s.harvest.present %}
       <div class="note">{{ s.harvest.message }}</div>

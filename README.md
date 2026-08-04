@@ -799,7 +799,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-193 tests, in six groups:
+200 tests, in six groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
