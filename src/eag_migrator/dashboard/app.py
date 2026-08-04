@@ -49,6 +49,7 @@ HARVEST_DRAFT = CONFIG_DIR / "harvest.draft.yaml"
 STATE_DB = STATE_DIR / "migration.sqlite"
 STAGING_DB = STATE_DIR / "staging.sqlite"
 SESSION_FILE = STATE_DIR / "session.json"
+V3_SESSION_FILE = STATE_DIR / "v3_session.json"
 WEB_CACHE = STATE_DIR / "webcache"
 
 JOB_LOGS = REPORTS_DIR / "jobs"
@@ -200,6 +201,9 @@ def _harvest_status() -> dict[str, Any]:
         return {
             "present": True,
             "valid": True,
+            # Always reported, so a draft written after a config already
+            # exists still offers a button to promote it.
+            "draft": HARVEST_DRAFT.exists(),
             "base_url": config.site.base_url,
             "requires_auth": config.site.requires_auth,
             "collections": [
@@ -221,7 +225,31 @@ def _harvest_status() -> dict[str, Any]:
     # every page and on the status poll, so an exception here is a blank UI
     # with the reason only in the container log.
     except Exception as exc:  # noqa: BLE001
-        return {"present": True, "valid": False, "message": f"{type(exc).__name__}: {exc}"}
+        return {
+            "present": True,
+            "valid": False,
+            "draft": HARVEST_DRAFT.exists(),
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _v3_api_status(settings: Any) -> dict[str, Any]:
+    from .. import v3_api
+
+    try:
+        return v3_api.status(settings, V3_SESSION_FILE)
+    except Exception as exc:  # noqa: BLE001 - never take the page down for this
+        return {"ready": False, "describe": f"{type(exc).__name__}: {exc}"}
+
+
+def _config_choices() -> list[dict[str, Any]]:
+    """Harvest configs sitting in config/, so one can be made live from here."""
+    out = []
+    for path in sorted(CONFIG_DIR.glob("harvest*.y*ml")):
+        if path.name in ("harvest.yaml", "harvest.draft.yaml"):
+            continue
+        out.append({"name": path.name, "example": "example" in path.name})
+    return out
 
 
 _BROWSER_CACHE: dict[str, Any] = {}
@@ -288,6 +316,8 @@ def build_status() -> dict[str, Any]:
             for j in recent
         ],
         "api_sink": bool(settings.v3_api_base_url),
+        "v3api": _v3_api_status(settings),
+        "configs": _config_choices(),
         "browser": browser_state(),
         # Never the key itself, only whether there is one.
         "assist": {"available": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip())},
@@ -604,9 +634,133 @@ def create_app() -> FastAPI:
         draft, live = pairs[which]
         if not draft.exists():
             return _back(request, error=f"no {which} draft to promote")
+        # Promoting over an existing file is the normal case on the second and
+        # every later round, so keep what it replaces rather than refusing.
+        if live.exists():
+            live.with_suffix(live.suffix + ".bak").write_text(
+                live.read_text(encoding="utf-8"), encoding="utf-8"
+            )
         live.write_text(draft.read_text(encoding="utf-8"), encoding="utf-8")
         draft.unlink()
-        return _back(request, message=f"{which} draft promoted")
+        replaced = " (previous kept as .bak)" if live.with_suffix(live.suffix + ".bak").exists() else ""
+        return _back(request, message=f"{which} draft promoted{replaced}")
+
+    @app.post("/actions/use-config", dependencies=[Depends(require_token)])
+    def action_use_config(request: Request, name: str = Form(...)) -> Any:
+        """Make one of the configs in config/ the live harvest config."""
+        source = CONFIG_DIR / name
+        # A name from a form is not a path: keep it inside config/.
+        if Path(name).name != name or not source.exists():
+            return _back(request, error=f"no such config: {name}")
+        if HARVEST_FILE.exists():
+            HARVEST_FILE.with_suffix(".yaml.bak").write_text(
+                HARVEST_FILE.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        HARVEST_FILE.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        return _back(request, message=f"{name} is now the harvest config")
+
+    # --- v3's API ------------------------------------------------------------
+
+    @app.post("/actions/v3-connect", dependencies=[Depends(require_token)])
+    def action_v3_connect(
+        request: Request, base_url: str = Form(...), cookie: str = Form("")
+    ) -> Any:
+        from .. import v3_api
+
+        if not cookie.strip():
+            return _back(request, error="paste the Cookie header from a signed-in v3 tab")
+        try:
+            v3_api.save_cookie(base_url.strip(), cookie.strip(), V3_SESSION_FILE)
+        except ValueError as exc:
+            return _back(request, error=str(exc))
+        # The value is never echoed back — only that it was stored.
+        return _back(request, message="v3 session saved")
+
+    @app.post("/actions/v3-forget", dependencies=[Depends(require_token)])
+    def action_v3_forget(request: Request) -> Any:
+        from .. import v3_api
+
+        gone = v3_api.forget(V3_SESSION_FILE)
+        return _back(request, message="v3 session deleted" if gone else "nothing stored")
+
+    @app.post("/actions/api-get", dependencies=[Depends(require_token)])
+    def action_api_get(request: Request, path: str = Form(...)) -> Any:
+        def work(job: Any) -> dict[str, Any]:
+            return _api_call(job, "GET", path.strip(), None)
+
+        return _launch(request, "api-get", f"GET {path.strip()}", work)
+
+    @app.post("/actions/api-post", dependencies=[Depends(require_token)])
+    def action_api_post(
+        request: Request, path: str = Form(...), body: str = Form(...),
+        confirm: str = Form(""),
+    ) -> Any:
+        if confirm.strip().lower() != "write":
+            return _back(
+                request,
+                error="this creates a record in v3 — type write to confirm",
+            )
+        try:
+            payload = json.loads(body)
+        except ValueError as exc:
+            return _back(request, error=f"that is not valid JSON: {exc}")
+
+        def work(job: Any) -> dict[str, Any]:
+            return _api_call(job, "POST", path.strip(), payload)
+
+        return _launch(request, "api-post", f"POST {path.strip()}", work)
+
+    def _api_call(job: Any, method: str, path: str, payload: Any) -> dict[str, Any]:
+        """One request to v3, reported through the sink's own response handling.
+
+        Deliberately the same _unwrap the migration uses: a probe that
+        disagreed with the run about whether a write succeeded would be worse
+        than no probe at all.
+        """
+        from .. import v3_api
+        from ..adapters.api_sink import _find_id, _unwrap
+
+        settings = load_settings()
+        creds = v3_api.load_credentials(settings, V3_SESSION_FILE)
+        job.say(f"{method} {creds.base_url}{path} using {creds.describe()}")
+
+        client = v3_api.client(settings, V3_SESSION_FILE)
+        try:
+            if method == "GET":
+                resp = client.get(path if path.startswith("/") else f"/{path}")
+            else:
+                resp = client.post(path if path.startswith("/") else f"/{path}", json=payload)
+        finally:
+            client.close()
+
+        job.say(f"HTTP {resp.status_code} {resp.headers.get('content-type', '')}")
+        try:
+            body = resp.json()
+        except ValueError:
+            job.say("not JSON — first 300 bytes:")
+            job.say(resp.text[:300])
+            return {"status": resp.status_code, "json": False}
+
+        ok, problem, record = _unwrap(body)
+        if ok:
+            job.say("accepted")
+            found = _find_id(record, None)
+            if found:
+                job.say(f"id assigned: {found}")
+        else:
+            job.say(f"REJECTED despite HTTP {resp.status_code}: {problem}")
+
+        if isinstance(record, dict):
+            job.say(f"keys: {', '.join(sorted(record)[:25])}")
+        elif isinstance(record, list):
+            job.say(f"{len(record)} item(s)")
+            if record and isinstance(record[0], dict):
+                job.say(f"item keys: {', '.join(sorted(record[0])[:25])}")
+
+        name = f"api-{method.lower()}-{path.strip('/').replace('/', '-') or 'root'}.json"
+        out = save_json(body, REPORTS_DIR / name)
+        job.say(f"full response: {out}")
+        return {"status": resp.status_code, "accepted": ok, "report": str(out)}
 
     @app.post("/actions/plan", dependencies=[Depends(require_token)])
     def action_plan(request: Request, limit: int = Form(0)) -> Any:

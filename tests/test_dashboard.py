@@ -34,6 +34,9 @@ def workspace(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(dash, "STAGING_DB", state / "staging.sqlite")
     monkeypatch.setattr(dash, "SESSION_FILE", state / "session.json")
     monkeypatch.setattr(dash, "WEB_CACHE", state / "webcache")
+    monkeypatch.setattr(dash, "V3_SESSION_FILE", state / "v3_session.json")
+    for name in ("V3_API_BASE_URL", "V3_API_TOKEN", "V3_API_COOKIE"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(dash, "MAPPING_FILE", tmp_path / "config" / "mapping.yaml")
     monkeypatch.setattr(dash, "MAPPING_DRAFT", tmp_path / "config" / "mapping.draft.yaml")
     monkeypatch.setattr(dash, "HARVEST_FILE", tmp_path / "config" / "harvest.yaml")
@@ -754,3 +757,210 @@ def test_browser_status_explains_itself_when_missing(monkeypatch):
     assert status["available"] is False
     assert "Executable doesn't exist" in status["reason"]
     assert status["hint"]
+
+
+# --- v3's API, driven from the dashboard ------------------------------------
+
+
+def _v3_api(monkeypatch):
+    """A stand-in v3 that answers with the real envelope shape."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"reply": {"data": {"key": "019f-abc"}, "messages": [], "succeeded": True},
+             "seen": []}
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_a):
+            pass
+
+        def _go(self, method):
+            length = int(self.headers.get("Content-Length") or 0)
+            state["seen"].append(
+                {"method": method, "path": self.path,
+                 "cookie": self.headers.get("Cookie"),
+                 "body": self.rfile.read(length).decode() if length else ""}
+            )
+            body = _json.dumps(state["reply"]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            self._go("GET")
+
+        def do_POST(self):  # noqa: N802
+            self._go("POST")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address[:2]
+    state["url"] = f"http://{host}:{port}"
+    return state, server
+
+
+def test_a_v3_session_can_be_saved_and_never_comes_back_out(workspace, client):
+    state, server = _v3_api(None)
+    try:
+        res = client.post(
+            "/actions/v3-connect",
+            data={"base_url": state["url"], "cookie": "eag_v3=s3cr3t-value; other=x"},
+            follow_redirects=False,
+        )
+        assert res.status_code == 303
+
+        page = client.get("/").text
+        body = client.get("/api/status").json()
+    finally:
+        server.shutdown()
+
+    assert body["v3api"]["ready"] is True
+    assert body["v3api"]["base_url"] == state["url"]
+    # The whole point of storing it here: the value is never rendered again.
+    assert "s3cr3t-value" not in page
+    assert "s3cr3t-value" not in str(body)
+    # It is stored, deliberately — but only on disk, and only readable by us.
+    assert "s3cr3t-value" in dash.V3_SESSION_FILE.read_text()
+    assert oct(dash.V3_SESSION_FILE.stat().st_mode)[-3:] == "600"
+
+
+def test_api_get_runs_as_a_job_and_reports_the_keys(workspace, client):
+    state, server = _v3_api(None)
+    import eag_migrator.dashboard.app as dashmod
+
+    try:
+        state["reply"] = {
+            "data": [{"key": "019f-aaa", "profileName": "Default", "isDefault": True}],
+            "succeeded": True,
+        }
+        client.post("/actions/v3-connect",
+                    data={"base_url": state["url"], "cookie": "eag_v3=tok"},
+                    follow_redirects=False)
+        res = client.post("/actions/api-get", data={"path": "/api/V1/pricing-profiles"},
+                          follow_redirects=False)
+        assert res.status_code == 303
+        job = dashmod.jobs.recent(1)[0]
+        _wait(job)
+    finally:
+        server.shutdown()
+
+    assert job.status == "done", job.error
+    log = "\n".join(job.log)
+    assert "HTTP 200" in log
+    assert "profileName" in log
+    assert "eag_v3=tok" not in log            # the credential never reaches the log
+    assert state["seen"][0]["cookie"] == "eag_v3=tok"
+
+
+def test_api_post_needs_the_confirmation_word(workspace, client):
+    state, server = _v3_api(None)
+    try:
+        client.post("/actions/v3-connect",
+                    data={"base_url": state["url"], "cookie": "eag_v3=tok"},
+                    follow_redirects=False)
+        res = client.post(
+            "/actions/api-post",
+            data={"path": "/api/V1/customers", "body": '{"a": 1}', "confirm": ""},
+            follow_redirects=False,
+        )
+    finally:
+        server.shutdown()
+
+    assert res.status_code == 303
+    assert "type+write" in res.headers["location"] or "confirm" in res.headers["location"]
+    assert state["seen"] == []                 # nothing was sent
+
+
+def test_api_post_reports_a_rejection_that_arrived_as_200(workspace, client):
+    """The dashboard must reach the same verdict the migration would."""
+    state, server = _v3_api(None)
+    import eag_migrator.dashboard.app as dashmod
+
+    try:
+        state["reply"] = {"data": None, "messages": ["Phone Number is required"],
+                          "succeeded": False}
+        client.post("/actions/v3-connect",
+                    data={"base_url": state["url"], "cookie": "eag_v3=tok"},
+                    follow_redirects=False)
+        client.post(
+            "/actions/api-post",
+            data={"path": "/api/V1/customers", "body": '{"customerName": "ZZ Test"}',
+                  "confirm": "write"},
+            follow_redirects=False,
+        )
+        job = dashmod.jobs.recent(1)[0]
+        _wait(job)
+    finally:
+        server.shutdown()
+
+    assert job.status == "done", job.error
+    log = "\n".join(job.log)
+    assert "REJECTED" in log
+    assert "Phone Number is required" in log
+    assert job.result["accepted"] is False
+
+
+def test_bad_json_never_reaches_the_network(workspace, client):
+    state, server = _v3_api(None)
+    try:
+        client.post("/actions/v3-connect",
+                    data={"base_url": state["url"], "cookie": "eag_v3=tok"},
+                    follow_redirects=False)
+        res = client.post(
+            "/actions/api-post",
+            data={"path": "/api/V1/customers", "body": "{not json", "confirm": "write"},
+            follow_redirects=False,
+        )
+    finally:
+        server.shutdown()
+
+    assert res.status_code == 303
+    assert "valid+JSON" in res.headers["location"] or "JSON" in res.headers["location"]
+    assert state["seen"] == []
+
+
+# --- making a config live ---------------------------------------------------
+
+
+def test_a_config_from_the_directory_can_be_made_live(workspace, client):
+    (dash.CONFIG_DIR / "harvest.eag-v2.yaml").write_text(
+        "version: 1\nsite: {base_url: 'https://v2.example'}\ncollections: []\n"
+    )
+    body = client.get("/api/status").json()
+    assert "harvest.eag-v2.yaml" in [c["name"] for c in body["configs"]]
+
+    res = client.post("/actions/use-config", data={"name": "harvest.eag-v2.yaml"},
+                      follow_redirects=False)
+    assert res.status_code == 303
+    assert dash.HARVEST_FILE.exists()
+    assert "v2.example" in dash.HARVEST_FILE.read_text()
+
+
+def test_a_config_name_cannot_escape_the_config_directory(workspace, client):
+    res = client.post("/actions/use-config", data={"name": "../../etc/passwd"},
+                      follow_redirects=False)
+    assert res.status_code == 303
+    assert "no+such+config" in res.headers["location"]
+    assert not dash.HARVEST_FILE.exists()
+
+
+def test_promoting_over_an_existing_config_keeps_the_old_one(workspace, client):
+    """The second round of drafting had no button at all before this."""
+    dash.HARVEST_FILE.write_text("version: 1\nsite: {base_url: 'https://old.example'}\n"
+                                 "collections: []\n")
+    dash.HARVEST_DRAFT.write_text("version: 1\nsite: {base_url: 'https://new.example'}\n"
+                                  "collections: []\n")
+
+    page = client.get("/").text
+    assert "Promote harvest draft" in page      # the button is offered at all
+
+    client.post("/actions/promote", data={"which": "harvest"}, follow_redirects=False)
+
+    assert "new.example" in dash.HARVEST_FILE.read_text()
+    assert "old.example" in (dash.CONFIG_DIR / "harvest.yaml.bak").read_text()
+    assert not dash.HARVEST_DRAFT.exists()

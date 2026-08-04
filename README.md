@@ -58,10 +58,29 @@ Everything below can be driven from a browser instead:
 make dashboard             # http://127.0.0.1:19080
 ```
 
-One page shows connection health, the v2 session, the harvest config, the
-mapping and its unanswered TODOs, what is in staging, and every run. The
-buttons run the same code the CLI does — there is no second implementation, so
-the UI cannot drift from `eagm`.
+One page shows connection health, the v2 session, the v3 API connection, the
+harvest config, the mapping and its unanswered TODOs, what is in staging, and
+every run. The buttons run the same code the CLI does — there is no second
+implementation, so the UI cannot drift from `eagm`.
+
+The whole pipeline is reachable from it: sign in to v2, recon, capture, draft
+selectors from HTML, choose which config in `config/` is live, harvest,
+connect to v3's API and probe it, discover, scaffold, plan, migrate, verify
+and roll back.
+
+### Connecting to v3
+
+The **v3 API** card takes a base URL and the `Cookie` header from a signed-in
+v3 tab, and stores it in `state/v3_session.json` at mode 0600 — the same
+treatment the v2 session gets, and gitignored for the same reason. Setting it
+here means nothing needs `.env` editing, though `V3_API_BASE_URL` /
+`V3_API_COOKIE` / `V3_API_TOKEN` still win if set, so unattended runs stay
+configurable from the environment.
+
+The value is never rendered back — the card shows the URL, which credential
+kind is in use, and how old it is. From there, **GET** reads an endpoint and
+**POST** sends one record, both streaming their result to the live log and
+writing the full response to `reports/`.
 
 ### Watching it work
 
@@ -102,7 +121,8 @@ A few deliberate constraints:
 - **One job at a time.** Two concurrent migrations would interleave writes and
   checkpoints.
 
-The CLI remains the full interface — the dashboard covers the common path.
+The CLI still exposes more — schema reports, error breakdowns, transform
+listings — but nothing in the migration path needs it.
 
 ---
 
@@ -877,7 +897,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-220 tests, in seven groups:
+228 tests, in seven groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like

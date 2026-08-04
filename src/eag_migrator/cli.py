@@ -1093,27 +1093,18 @@ def staging(
 
 
 def _api_client(settings: Settings):
-    from .adapters.api_sink import build_client
+    from . import v3_api
 
-    if not settings.v3_api_base_url:
+    creds = v3_api.load_credentials(settings)
+    if not creds.base_url:
         console.print(
             "[red]V3_API_BASE_URL is not set.[/red] Put v3's base URL in .env, "
-            "plus V3_API_COOKIE (paste the Cookie header from a signed-in "
-            "browser tab) or V3_API_TOKEN."
+            "plus V3_API_COOKIE or V3_API_TOKEN — or save a session from the "
+            "dashboard's v3 API panel."
         )
         raise typer.Exit(2)
-    credential = (
-        "token" if settings.v3_api_token
-        else "session cookie" if settings.v3_api_cookie
-        else "[yellow]none — expect 401[/yellow]"
-    )
-    console.print(f"[dim]{settings.v3_api_base_url} using {credential}[/dim]")
-    return build_client(
-        settings.v3_api_base_url,
-        settings.v3_api_token,
-        settings.v3_api_timeout,
-        settings.v3_api_cookie,
-    )
+    console.print(f"[dim]{creds.base_url} using {creds.describe()}[/dim]")
+    return v3_api.client(settings)
 
 
 def _show_api_response(resp, path: str, save_as: str) -> None:

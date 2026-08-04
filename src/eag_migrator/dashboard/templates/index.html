@@ -194,10 +194,26 @@
       </div>
     </form>
 
-    {% if s.harvest.draft and not s.harvest.present %}
+    {% if s.harvest.draft %}
       <form method="post" action="/actions/promote{{ q }}" class="actions">
         <input type="hidden" name="which" value="harvest">
         <button class="primary">Promote harvest draft →</button>
+      </form>
+      {% if s.harvest.present %}
+        <div class="muted">Replaces the current config; the old one is kept
+          as <code>harvest.yaml.bak</code>.</div>
+      {% endif %}
+    {% endif %}
+
+    {% if s.configs %}
+      <form method="post" action="/actions/use-config{{ q }}" style="margin-top:14px">
+        <label>Or use a config from <code>config/</code></label>
+        <select name="name">
+          {% for c in s.configs %}
+            <option value="{{ c.name }}">{{ c.name }}{% if c.example %} (example){% endif %}</option>
+          {% endfor %}
+        </select>
+        <div class="actions"><button>Make it the harvest config</button></div>
       </form>
     {% endif %}
     {% if s.harvest.present and s.harvest.valid %}
@@ -210,6 +226,75 @@
     {% elif s.harvest.present %}
       <div class="note">{{ s.harvest.message }}</div>
     {% endif %}
+  </div>
+
+  <!-- v3's API ----------------------------------------------------------- -->
+  <div class="card">
+    <h2>v3 API</h2>
+    <p class="muted">
+      {% if s.v3api.ready %}
+        <span class="ok">{{ s.v3api.base_url }}</span> — {{ s.v3api.describe }}
+        {% if s.v3api.age_hours is not none %}
+          · saved {{ s.v3api.age_hours }}h ago{% if s.v3api.stale %}
+            <span class="warn">(may have expired)</span>{% endif %}
+        {% endif %}
+      {% else %}
+        Not connected — {{ s.v3api.describe }}.
+      {% endif %}
+    </p>
+
+    <details {% if not s.v3api.ready %}open{% endif %}>
+      <summary>Connect</summary>
+      <form method="post" action="/actions/v3-connect{{ q }}">
+        <label>v3 base URL</label>
+        <input type="text" name="base_url" placeholder="https://shop.eagsoftware.com"
+               value="{{ s.v3api.base_url or '' }}" required>
+        <label>Cookie header from a signed-in v3 tab</label>
+        <input type="password" name="cookie" placeholder="name=value; other=value"
+               autocomplete="off">
+        <div class="muted">devtools → Network → any request → copy the whole
+          Cookie header. Stored in <code>state/v3_session.json</code> at mode
+          0600, never rendered back.</div>
+        <div class="actions">
+          <button class="primary">Save session</button>
+        </div>
+      </form>
+      {% if s.v3api.saved %}
+        <form method="post" action="/actions/v3-forget{{ q }}" class="actions">
+          <button class="danger">Delete stored session</button>
+        </form>
+      {% endif %}
+    </details>
+
+    <form method="post" action="/actions/api-get{{ q }}" style="margin-top:14px">
+      <label>Read an endpoint</label>
+      <input type="text" name="path" value="/api/V1/pricing-profiles" required>
+      <div class="muted">Pull what the mapping needs before writing anything —
+        the UUIDs behind pricing profiles, locations, payment terms and users,
+        and the codes behind v3's enums.</div>
+      <div class="actions">
+        <button {% if not s.v3api.ready %}disabled title="connect first"{% endif %}>GET</button>
+      </div>
+    </form>
+
+    <details style="margin-top:14px">
+      <summary>Send one record (creates it)</summary>
+      <form method="post" action="/actions/api-post{{ q }}">
+        <label>Endpoint</label>
+        <input type="text" name="path" value="/api/V1/customers" required>
+        <label>JSON body</label>
+        <textarea name="body" rows="5">{"customerName": "ZZ Migration Test"}</textarea>
+        <div class="muted">Exercises the same client and response handling a
+          real migration uses, so a 200 that means “rejected” shows up here
+          rather than 400 records in. Expect the first attempt to fail — v3
+          names the fields it wanted.</div>
+        <label>Type <code>write</code> to confirm</label>
+        <input type="text" name="confirm" autocomplete="off">
+        <div class="actions">
+          <button class="danger" {% if not s.v3api.ready %}disabled{% endif %}>POST</button>
+        </div>
+      </form>
+    </details>
   </div>
 
   <!-- Schema + mapping --------------------------------------------------- -->
