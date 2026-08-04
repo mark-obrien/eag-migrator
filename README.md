@@ -192,9 +192,16 @@ Three ways, in order of preference:
 
 | | How | When |
 |---|---|---|
-| **Cookie import** | `eagm login <url> --cookies 'sid=…'` | Default. Sign in yourself; no password is ever handled here. Also accepts a path to a cookie-manager JSON export. |
+| **Supply the login** | Type the username and password into the dashboard, or `eagm login <url> --form` with `EAGM_USERNAME`/`EAGM_PASSWORD` | Simplest. Drives the app's real login page in a headless browser, so it survives CSRF tokens, hashed field names and JS-built forms. Cannot get past MFA or a captcha. |
+| **Cookie import** | `eagm login <url> --cookies 'sid=…'`, or `EAGM_COOKIE` | No password is ever handled. Use this when the app has MFA, or when you would rather not hand credentials to a tool. Also accepts a cookie-manager JSON export. |
 | **Bearer token** | `EAGM_AUTH_TOKEN=…` | The app issues API tokens. |
-| **Form login** | `eagm login <url> --form` with `EAGM_USERNAME`/`EAGM_PASSWORD` | Unattended runs only. Drives the real login page, so it survives CSRF tokens and JS-built forms — but not MFA. |
+
+With the credential route, the password fills the form and is then dropped —
+only the resulting cookies and auth headers are stored. It is not written to
+the session file, the job log or any report, and the username is masked in the
+log. Give it a `success_selector` (a CSS selector only present once signed in)
+so a failed login is detected properly rather than silently saving a session
+for the login page.
 
 The session is written to `state/session.json` mode 0600 and gitignored. It is
 live credentials to a system holding customer data: **delete it when the
@@ -554,7 +561,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-134 tests, in five groups:
+143 tests, in five groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -574,9 +581,10 @@ make test-local    # on the host
 - **Capture** — drives real Chromium, signs in, finds the internal API, and
   checks the config it drafts actually harvests without hand-editing. Skipped
   automatically when no browser is available.
-- **The dashboard** — weighted towards what would actually hurt: that session
-  values never reach the HTML or the JSON API, that database passwords are
-  stripped, that a migration cannot start without its confirmation word, that
+- **The dashboard** — weighted towards what would actually hurt: that a
+  supplied password never reaches the session file, the job log or a page,
+  that session values never reach the HTML or the JSON API, that database
+  passwords are stripped, that a migration cannot start without its confirmation word, that
   a crafted URL cannot read outside `reports/`, that the token gate holds, and
   that a stopped run stays resumable.
 

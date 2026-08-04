@@ -379,3 +379,94 @@ def test_dashboard_refuses_to_start_on_a_busy_port(monkeypatch):
     assert "already in use" in result.output
     assert "--auto-port" in result.output
     assert "EAGM_DASHBOARD_PORT" in result.output
+
+
+# --- signing in with credentials -------------------------------------------
+
+
+def test_the_password_is_never_stored_or_logged(workspace, monkeypatch):
+    """The credentials fill a form; only cookies and headers may be kept."""
+    import eag_migrator.dashboard.app as dashmod
+    from eag_migrator.web.session import Session
+
+    seen = {}
+
+    def fake_login(base_url, spec, *, username=None, password=None, headless=True):
+        seen["username"] = username
+        seen["password"] = password
+        session = Session.from_cookie_header("sid=granted", base_url)
+        session.headers["X-CSRF-Token"] = "tok"
+        return session
+
+    monkeypatch.setattr("eag_migrator.web.login.form_login", fake_login)
+    client = TestClient(dashmod.create_app())
+
+    res = client.post(
+        "/actions/login-form",
+        data={
+            "url": "https://v2.example",
+            "username": "owner@shop.example",
+            "password": "hunter2-super-secret",
+            "login_url": "/login",
+            "success_selector": ".dashboard",
+        },
+        follow_redirects=False,
+    )
+    assert res.status_code == 303
+
+    job = dashmod.jobs.recent(1)[0]
+    _wait(job)
+    assert job.status == "done", job.error
+
+    # It reached the login helper...
+    assert seen["password"] == "hunter2-super-secret"
+    # ...and went no further than that.
+    log = "\n".join(job.log)
+    assert "hunter2-super-secret" not in log
+    assert "owner@shop.example" not in log        # masked in the log
+    assert "ow" in log                            # but identifiable
+
+    stored = dash.SESSION_FILE.read_text()
+    assert "hunter2-super-secret" not in stored
+    assert "owner@shop.example" not in stored
+    assert "granted" in stored                    # the cookie is what we keep
+
+    page = client.get("/").text
+    assert "hunter2-super-secret" not in page
+
+
+def test_a_failed_sign_in_is_reported_without_the_password(workspace, monkeypatch):
+    import eag_migrator.dashboard.app as dashmod
+    from eag_migrator.web.login import LoginFailed
+
+    def fail(base_url, spec, *, username=None, password=None, headless=True):
+        raise LoginFailed("still on the login page — credentials rejected")
+
+    monkeypatch.setattr("eag_migrator.web.login.form_login", fail)
+    client = TestClient(dashmod.create_app())
+
+    client.post(
+        "/actions/login-form",
+        data={"url": "https://v2.example", "username": "u@e.com",
+              "password": "wrong-password", "login_url": "/login",
+              "success_selector": ""},
+        follow_redirects=False,
+    )
+    job = dashmod.jobs.recent(1)[0]
+    _wait(job)
+
+    assert job.status == "failed"
+    assert "credentials rejected" in job.error
+    assert "wrong-password" not in "\n".join(job.log)
+    assert not dash.SESSION_FILE.exists()
+
+
+def test_form_login_accepts_credentials_directly_or_from_env(monkeypatch):
+    """The dashboard passes them in; the CLI can still use the environment."""
+    import inspect
+
+    from eag_migrator.web.login import form_login
+
+    params = inspect.signature(form_login).parameters
+    assert "username" in params and "password" in params
+    assert params["username"].default is None

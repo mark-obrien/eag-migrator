@@ -71,15 +71,40 @@
         <button class="danger">Delete session</button>
       </form>
     {% else %}
-      <p class="muted">No session. Sign in to v2 with your own browser, then paste
-      the <span class="mono">Cookie</span> request header from devtools.</p>
-      <form method="post" action="/actions/login{{ q }}">
-        <label>v2 URL</label>
+      <p class="muted">No session yet. Two ways in.</p>
+
+      <form method="post" action="/actions/login-form{{ q }}">
+        <label style="margin-top:0"><strong>Sign in for me</strong> — drives the
+          app's real login page in a browser</label>
         <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-        <label>Cookie header (or leave blank to use EAGM_COOKIE)</label>
-        <textarea name="cookies" rows="3" placeholder="sid=…; csrf=…"></textarea>
-        <div class="actions"><button class="primary">Save session</button></div>
+        <label>Email / username</label>
+        <input type="text" name="username" autocomplete="off" required>
+        <label>Password</label>
+        <input type="password" name="password" autocomplete="off" required>
+        <label>Login page path</label>
+        <input type="text" name="login_url" value="/login">
+        <label>A CSS selector only present once signed in (recommended)</label>
+        <input type="text" name="success_selector" placeholder=".dashboard, #app, nav.main">
+        <div class="actions"><button class="primary">Sign in</button></div>
       </form>
+      <p class="muted" style="margin-top:8px">
+        The password fills the form and is then dropped — only the resulting
+        cookies and auth headers are stored. Needs Chromium in the image
+        (<span class="mono">make build-browser</span>), and it cannot get past
+        MFA or a captcha.
+      </p>
+
+      <details style="margin-top:14px">
+        <summary>Or paste a Cookie header instead (no password handled)</summary>
+        <form method="post" action="/actions/login{{ q }}" style="margin-top:10px">
+          <label>v2 URL</label>
+          <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+          <label>Cookie header — devtools → Network → any request</label>
+          <textarea name="cookies" rows="3" placeholder="sid=…; csrf=…"></textarea>
+          <div class="muted">Leave blank to use <span class="mono">EAGM_COOKIE</span>.</div>
+          <div class="actions"><button>Save session</button></div>
+        </form>
+      </details>
     {% endif %}
   </div>
 

@@ -51,12 +51,25 @@ def import_session(source: str, origin: str) -> Session:
     return Session.from_cookie_header(source, origin)
 
 
-def form_login(base_url: str, spec: LoginSpec, *, headless: bool = True) -> Session:
+def form_login(
+    base_url: str,
+    spec: LoginSpec,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    headless: bool = True,
+) -> Session:
     """Drive the app's login form in a real browser and keep the session.
 
-    Also picks up any auth header the app's own JavaScript attaches — SPAs
-    frequently send a bearer or CSRF token that the cookie jar alone does not
-    carry, and without it every replayed API call 401s.
+    A real browser is the only thing that reliably survives CSRF tokens, hashed
+    field names and JS-built request signing. It also picks up any auth header
+    the app's own JavaScript attaches — SPAs frequently send a bearer or CSRF
+    token the cookie jar does not carry, and without it every replayed API call
+    401s.
+
+    Credentials are used to fill the form and then dropped. Only the resulting
+    cookies and auth headers are ever stored. Nothing here can get past MFA or
+    a captcha — those need the cookie-import route.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -67,8 +80,8 @@ def form_login(base_url: str, spec: LoginSpec, *, headless: bool = True) -> Sess
             "to import a session from your own browser instead."
         ) from exc
 
-    username = os.getenv(spec.username_env)
-    password = os.getenv(spec.password_env)
+    username = username or os.getenv(spec.username_env)
+    password = password or os.getenv(spec.password_env)
     if not username or not password:
         raise LoginFailed(
             f"set {spec.username_env} and {spec.password_env} in the environment "

@@ -180,3 +180,68 @@ def test_the_drafted_config_actually_harvests(app, session, tmp_path):
     assert "cvv" in payments.scrubbed.blocked
     raw = (tmp_path / "s.sqlite").read_bytes()
     assert b"4111111111111111" not in raw
+
+
+# --- signing in from the dashboard -----------------------------------------
+
+
+def test_dashboard_signs_in_with_supplied_credentials(app, tmp_path, monkeypatch):
+    """End to end: type a username and password into the UI, get a session.
+
+    No mocking — this drives the fixture app's real login form in real
+    Chromium, exactly as it would against v2.
+    """
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    import eag_migrator.dashboard.app as dash
+
+    for name in ("CONFIG_DIR", "PROFILES_DIR", "REPORTS_DIR", "STATE_DIR"):
+        folder = tmp_path / name.lower()
+        folder.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(dash, name, folder)
+    monkeypatch.setattr(dash, "SESSION_FILE", tmp_path / "session.json")
+    monkeypatch.setattr(dash, "STATE_DB", tmp_path / "migration.sqlite")
+    monkeypatch.setattr(dash, "STAGING_DB", tmp_path / "staging.sqlite")
+    monkeypatch.setattr(dash, "jobs", dash.JobManager())
+    monkeypatch.delenv("EAGM_DASHBOARD_TOKEN", raising=False)
+
+    client = TestClient(dash.create_app())
+    res = client.post(
+        "/actions/login-form",
+        data={
+            "url": app.url,
+            "username": "owner@clearview.example",
+            "password": "correct-horse",
+            "login_url": "/login",
+            "success_selector": ".dashboard",
+        },
+        follow_redirects=False,
+    )
+    assert res.status_code == 303
+
+    import time
+
+    job = dash.jobs.recent(1)[0]
+    deadline = time.time() + 60
+    while job.active and time.time() < deadline:
+        time.sleep(0.1)
+    assert job.status == "done", job.error
+
+    # A working session landed, including the header the SPA attaches.
+    session = Session.load(dash.SESSION_FILE)
+    assert any(c["name"] == "cv_session" for c in session.cookies)
+    assert session.headers.get(CSRF_HEADER) == CSRF_VALUE
+
+    # And it is genuinely authenticated against the app.
+    from eag_migrator.web.fetcher import Fetcher
+
+    with Fetcher(app.url, cache_dir=None, use_cache=False, rate_limit_rps=0,
+                 respect_robots=False, session=session) as fetcher:
+        resp = fetcher.get(f"{app.url}/api/v2/customers?per_page=5")
+    assert resp.status == 200
+    assert "Dana Reyes" in resp.text
+
+    # The password is nowhere.
+    assert "correct-horse" not in "\n".join(job.log)
+    assert "correct-horse" not in dash.SESSION_FILE.read_text()

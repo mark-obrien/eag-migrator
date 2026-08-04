@@ -95,6 +95,14 @@ def _safe_url(url: str) -> str:
         return url.split("@")[-1] if "@" in url else url
 
 
+def _mask_user(value: str) -> str:
+    """Enough of the username to confirm the right account, not the whole thing."""
+    name, _, domain = value.partition("@")
+    head = name[:2] if len(name) > 3 else name[:1]
+    masked = f"{head}{'•' * max(len(name) - len(head), 1)}"
+    return f"{masked}@{domain}" if domain else masked
+
+
 def _format_step(step: Any) -> str:
     """Render a transform step readably.
 
@@ -622,6 +630,45 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             return _back(request, error=f"{type(exc).__name__}: {exc}")
         return _back(request, message="session saved")
+
+    @app.post("/actions/login-form", dependencies=[Depends(require_token)])
+    def action_login_form(
+        request: Request,
+        url: str = Form(...),
+        username: str = Form(...),
+        password: str = Form(...),
+        login_url: str = Form("/login"),
+        success_selector: str = Form(""),
+    ) -> Any:
+        """Sign in by driving the app's own login page in a real browser.
+
+        The credentials fill the form and are then dropped — only the resulting
+        cookies and auth headers are stored. They are deliberately not written
+        to the job log, the session file or anywhere else.
+        """
+        from ..web.login import LoginSpec
+
+        spec = LoginSpec(
+            login_url=login_url or "/login",
+            success_selector=success_selector.strip() or None,
+        )
+
+        def work(job: Any) -> dict[str, Any]:
+            from ..web.login import form_login
+
+            job.say(f"opening {url.rstrip('/')}/{spec.login_url.lstrip('/')}")
+            job.say(f"signing in as {_mask_user(username)}")
+            session = form_login(url, spec, username=username, password=password)
+            session.save(SESSION_FILE)
+            job.say(f"signed in — {session.describe()}")
+            if not spec.success_selector:
+                job.say(
+                    "no success selector was given, so this only checked that the "
+                    "page moved off the login URL. Set one for a real check."
+                )
+            return {"cookies": len(session.cookies), "headers": len(session.headers)}
+
+        return _launch(request, "login", "Sign in to v2", work)
 
     @app.post("/actions/logout", dependencies=[Depends(require_token)])
     def action_logout(request: Request) -> Any:
