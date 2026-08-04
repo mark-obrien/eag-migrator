@@ -741,6 +741,11 @@ def capture(
     anonymous: bool = typer.Option(
         False, "--anonymous", help="Ignore any stored session"
     ),
+    explore: bool = typer.Option(
+        False, "--explore", help="Follow the app's own navigation to find more screens"
+    ),
+    max_pages: int = typer.Option(25, help="--explore: most pages to visit"),
+    depth: int = typer.Option(2, help="--explore: how many links deep to follow"),
 ) -> None:
     """Drive a real browser and record the network calls the site makes.
 
@@ -771,6 +776,9 @@ def capture(
             scroll=scroll,
             wait_ms=wait,
             session=session,
+            explore=explore,
+            max_pages=max_pages,
+            depth=depth,
         )
     except BrowserUnavailable as exc:
         console.print(f"[red]{exc}[/red]")
@@ -795,6 +803,14 @@ def capture(
         console.print(table)
     else:
         console.print("[yellow]No JSON/XHR calls recorded.[/yellow]")
+
+    if report.skipped_links:
+        console.print(
+            f"\n[dim]{len(report.skipped_links)} link(s) not followed "
+            f"(state changes, downloads, logout):[/dim]"
+        )
+        for link in report.skipped_links[:8]:
+            console.print(f"  [dim]· {link.url} — {link.reason}[/dim]")
 
     for note in report.notes:
         console.print(f"  • {note}")

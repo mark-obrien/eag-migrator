@@ -703,7 +703,13 @@ def create_app() -> FastAPI:
         return _launch(request, "recon", "Recon site", work)
 
     @app.post("/actions/capture", dependencies=[Depends(require_token)])
-    def action_capture(request: Request, url: str = Form(...), paths: str = Form("/")) -> Any:
+    def action_capture(
+        request: Request,
+        url: str = Form(...),
+        paths: str = Form("/"),
+        explore: str = Form(""),
+        max_pages: int = Form(25),
+    ) -> Any:
         def work(job: Any) -> dict[str, Any]:
             from ..web.capture import capture, render_markdown as render_capture
             from ..web.draft import draft_from_capture
@@ -712,11 +718,27 @@ def create_app() -> FastAPI:
 
             session = Session.load(SESSION_FILE) if SESSION_FILE.exists() else None
             wanted = [p.strip() for p in paths.replace(",", "\n").splitlines() if p.strip()]
-            job.say(f"driving {len(wanted)} page(s){' (authenticated)' if session else ''}")
+            job.say(
+                f"driving {len(wanted)} page(s)"
+                f"{' and following the app navigation' if explore else ''}"
+                f"{' (authenticated)' if session else ''}"
+            )
 
             report = capture(
-                url, wanted or ["/"], har_path=REPORTS_DIR / "capture.har", session=session
+                url,
+                wanted or ["/"],
+                har_path=REPORTS_DIR / "capture.har",
+                session=session,
+                explore=bool(explore),
+                max_pages=max_pages,
             )
+            if report.skipped_links:
+                job.say(
+                    f"left {len(report.skipped_links)} link(s) alone "
+                    f"(state changes, downloads, logout)"
+                )
+                for link in report.skipped_links[:6]:
+                    job.say(f"  · {link.url} — {link.reason}")
             save_json(report.to_dict(), REPORTS_DIR / "capture.json")
             save_text(render_capture(report), REPORTS_DIR / "capture.md")
             job.say(f"recorded {len(report.api_calls)} JSON endpoint(s)")

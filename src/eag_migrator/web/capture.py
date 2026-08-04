@@ -35,6 +35,31 @@ STATIC_EXT = re.compile(
     r"\.(png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|css|mp4|webm|m4a|mp3)(\?|$)", re.I
 )
 
+# Links an explore pass must never follow.
+#
+# This browses a live scheduling, quoting and payments system while signed
+# in as a real user, so a naive crawler could void an invoice, archive a
+# customer, email someone, or log itself out mid-run. Anything that reads as
+# a state change is skipped and reported rather than followed. It is a
+# denylist, so it is not a guarantee — but the failure mode of missing a
+# screen is trivial next to the failure mode of triggering one.
+UNSAFE_LINK = re.compile(
+    r"(^|[/?&#_.-])("
+    r"log[ _-]?out|sign[ _-]?out|"                        # would end the session
+    r"delete|destroy|remove|trash|archive|purge|"
+    r"cancel|void|refund|chargeback|reverse|"
+    r"send|e[ _-]?mail|notify|sms|text|dispatch|remind|"   # contacts real people
+    r"approve|reject|decline|accept|confirm|finali[sz]e|"
+    r"pay|charge|capture|checkout|invoice_now|"
+    r"impersonate|switch[ _-]?user|become|"
+    r"reset|regenerate|rotate|revoke|disable|deactivate|"
+    r"merge|restore|publish|unpublish"
+    r")([/?&#_.-]|$)",
+    re.IGNORECASE,
+)
+NON_PAGE_SCHEME = re.compile(r"^(mailto:|tel:|javascript:|blob:|data:)", re.I)
+DOWNLOAD_EXT = re.compile(r"\.(pdf|csv|xlsx?|zip|docx?|pptx?)(\?|$)", re.I)
+
 
 class BrowserUnavailable(RuntimeError):
     """Playwright or its Chromium binary is not installed."""
@@ -103,10 +128,18 @@ class CapturedCall:
 
 
 @dataclass
+class SkippedLink:
+    url: str
+    reason: str
+    text: str = ""
+
+
+@dataclass
 class CaptureReport:
     base_url: str
     generated_at: str
     pages_visited: list[str] = field(default_factory=list)
+    skipped_links: list[SkippedLink] = field(default_factory=list)
     calls: list[CapturedCall] = field(default_factory=list)
     har_path: str | None = None
     notes: list[str] = field(default_factory=list)
@@ -201,6 +234,57 @@ def _summarise(payload: Any) -> tuple[list[str], int | None, Any, str]:
     return [], None, payload, ""
 
 
+LINK_SCRIPT = """() => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+  href: a.href,
+  method: (a.getAttribute('data-method') || '').toLowerCase(),
+  confirm: a.getAttribute('data-confirm') || a.getAttribute('data-turbo-confirm') || '',
+  text: (a.textContent || '').trim().slice(0, 60),
+}))"""
+
+
+def _classify_links(
+    raw: list[dict[str, Any]], origin: str, seen: set[str]
+) -> tuple[list[str], list[SkippedLink]]:
+    """Split the page's links into safe-to-visit and must-not-touch.
+
+    Reads the live DOM, so it works on a client-rendered app as long as it uses
+    real anchors — which almost all of them do, for accessibility and so that
+    middle-click works.
+    """
+    safe: list[str] = []
+    skipped: list[SkippedLink] = []
+    host = urlparse(origin).netloc
+
+    for item in raw:
+        href = (item.get("href") or "").split("#")[0]
+        text = item.get("text") or ""
+        if not href or NON_PAGE_SCHEME.match(href):
+            continue
+        if urlparse(href).netloc != host:
+            continue
+        if href in seen or href in safe:
+            continue
+
+        # Rails/Turbo mark destructive links with a verb or a confirm prompt.
+        if item.get("method") and item["method"] != "get":
+            skipped.append(SkippedLink(href, f"data-method={item['method']}", text))
+            continue
+        if item.get("confirm"):
+            skipped.append(SkippedLink(href, "has a confirmation prompt", text))
+            continue
+        if UNSAFE_LINK.search(urlparse(href).path + "?" + (urlparse(href).query or "")):
+            skipped.append(SkippedLink(href, "looks like a state change", text))
+            continue
+        if DOWNLOAD_EXT.search(href):
+            skipped.append(SkippedLink(href, "file download", text))
+            continue
+        if STATIC_EXT.search(href):
+            continue
+        safe.append(href)
+
+    return safe, skipped
+
+
 def capture(
     base_url: str,
     paths: list[str],
@@ -211,6 +295,9 @@ def capture(
     timeout_ms: int = 30_000,
     user_agent: str | None = None,
     session: Any = None,
+    explore: bool = False,
+    max_pages: int = 25,
+    depth: int = 2,
 ) -> CaptureReport:
     try:
         from playwright.sync_api import sync_playwright
@@ -337,8 +424,22 @@ def capture(
 
         page.on("response", on_response)
 
-        for path in paths:
-            url = path if path.startswith("http") else base_url.rstrip("/") + "/" + path.lstrip("/")
+        queue: list[tuple[str, int]] = [
+            (
+                path if path.startswith("http")
+                else base_url.rstrip("/") + "/" + path.lstrip("/"),
+                0,
+            )
+            for path in paths
+        ]
+        visited: set[str] = set()
+
+        while queue:
+            url, level = queue.pop(0)
+            if url in visited or len(visited) >= max_pages:
+                continue
+            visited.add(url)
+
             try:
                 page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
                 report.pages_visited.append(url)
@@ -355,6 +456,20 @@ def capture(
                 except Exception:  # noqa: BLE001
                     pass
             page.wait_for_timeout(wait_ms)
+
+            if not explore or level >= depth:
+                continue
+            try:
+                links = page.evaluate(LINK_SCRIPT)
+            except Exception:  # noqa: BLE001
+                continue
+            safe, skipped = _classify_links(links, base_url, visited)
+            for entry in skipped:
+                if not any(s.url == entry.url for s in report.skipped_links):
+                    report.skipped_links.append(entry)
+            for link in safe:
+                if link not in visited:
+                    queue.append((link, level + 1))
 
         context.close()
         browser.close()
@@ -398,6 +513,8 @@ def render_markdown(report: CaptureReport) -> str:
     lines = [f"# Network capture — {report.base_url}\n"]
     lines.append(f"- Generated: {report.generated_at}")
     lines.append(f"- Pages driven: {len(report.pages_visited)}")
+    if report.skipped_links:
+        lines.append(f"- Links not followed: {len(report.skipped_links)}")
     lines.append(f"- Calls recorded: **{len(report.calls)}** "
                  f"({len(report.api_calls)} returning JSON)")
     if report.har_path:
@@ -440,6 +557,18 @@ def render_markdown(report: CaptureReport) -> str:
         lines.append("|---|---|---|---:|")
         for c in other:
             lines.append(f"| {c.method} | `{c.pattern}` | {c.resource_type} | {c.status} |")
+        lines.append("")
+
+    if report.skipped_links:
+        lines.append("## Links deliberately not followed\n")
+        lines.append(
+            "Explore browses a live system while signed in, so anything that "
+            "reads as a state change is left alone.\n"
+        )
+        lines.append("| Link | Why | Label |")
+        lines.append("|---|---|---|")
+        for link in report.skipped_links:
+            lines.append(f"| `{link.url}` | {link.reason} | {link.text} |")
         lines.append("")
 
     if report.notes:

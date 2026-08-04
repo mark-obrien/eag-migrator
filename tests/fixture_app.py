@@ -97,7 +97,46 @@ LOGIN_HTML = """<!DOCTYPE html>
   <p>Forgot your password?</p>
 </body></html>"""
 
-# The app shell: renders nothing itself, loads everything over XHR.
+# A navigable app shell: each screen loads only its own endpoint over XHR, and
+# the nav includes the destructive links a real ops app has — an explore pass
+# must find the screens and leave those alone.
+SCREEN_HTML = """<!DOCTYPE html>
+<html><head><title>%(title)s — Clearview Ops</title></head>
+<body>
+<nav class="dashboard">
+  <a href="/customers">Customers</a>
+  <a href="/quotes">Quotes</a>
+  <a href="/schedule">Schedule</a>
+  <a href="/payments">Payments</a>
+  <a href="/settings">Settings</a>
+  <a href="/quotes/9001/delete">Delete quote</a>
+  <a href="/quotes/9001/send">Email to customer</a>
+  <a href="/payments/3001/refund">Refund</a>
+  <a href="/customers/5001/archive" data-confirm="Are you sure?">Archive</a>
+  <a href="/subscriptions/1" data-method="delete">Cancel plan</a>
+  <a href="/reports/quotes.pdf">Download PDF</a>
+  <a href="mailto:ops@clearview.example">Contact</a>
+  <a href="https://example.org/external">External</a>
+  <a href="/logout">Log out</a>
+</nav>
+<div id="root">Loading…</div>
+<script>
+const H = {'%(csrf_header)s': '%(csrf_value)s', 'Accept': 'application/json'};
+fetch('%(endpoint)s', {headers: H}).then(r => r.json())
+  .then(d => { document.getElementById('root').textContent = 'ready'; });
+</script>
+</body></html>"""
+
+SCREENS = {
+    "/": ("Dashboard", "/api/v2/session"),
+    "/customers": ("Customers", "/api/v2/customers?page=1&per_page=2"),
+    "/quotes": ("Quotes", "/api/v2/quotes?limit=2&offset=0"),
+    "/schedule": ("Schedule", "/api/v2/appointments?limit=2"),
+    "/payments": ("Payments", "/api/v2/payments?page=1&per_page=50"),
+    "/settings": ("Settings", "/api/v2/session"),
+}
+
+# The original single-page shell, kept for the tests that drive /app/ directly.
 APP_HTML = """<!DOCTYPE html>
 <html><head><title>Clearview Ops</title></head>
 <body>
@@ -199,8 +238,23 @@ class Handler(BaseHTTPRequestHandler):
             self._deny()
             return
 
-        if path in ("/", "/app", "/app/", "/customers", "/quotes", "/schedule"):
+        if path in ("/app", "/app/"):
             self._send(APP_HTML % {"csrf_header": CSRF_HEADER, "csrf_value": CSRF_VALUE})
+            return
+
+        screen = SCREENS.get(path.rstrip("/") or "/")
+        if screen:
+            title, endpoint = screen
+            self._send(SCREEN_HTML % {
+                "title": title, "endpoint": endpoint,
+                "csrf_header": CSRF_HEADER, "csrf_value": CSRF_VALUE,
+            })
+            return
+
+        # Anything an explore pass should never reach. Reaching one is a bug.
+        if any(k in path for k in
+               ("delete", "send", "refund", "archive", "logout", "subscriptions")):
+            self._send("<html><body>DESTRUCTIVE ACTION PERFORMED</body></html>")
             return
 
         if path.startswith("/api/"):

@@ -245,3 +245,69 @@ def test_dashboard_signs_in_with_supplied_credentials(app, tmp_path, monkeypatch
     # The password is nowhere.
     assert "correct-horse" not in "\n".join(job.log)
     assert "correct-horse" not in dash.SESSION_FILE.read_text()
+
+
+# --- exploring the app on its own ------------------------------------------
+
+
+def test_explore_finds_screens_the_start_page_never_mentioned(app, session):
+    """The point: you should not have to know the app's routes in advance."""
+    plain = capture(app.url, ["/"], har_path=None, wait_ms=1200, scroll=False,
+                    session=session)
+    explored = capture(app.url, ["/"], har_path=None, wait_ms=1200, scroll=False,
+                       session=session, explore=True, max_pages=12, depth=2)
+
+    assert len(explored.pages_visited) > len(plain.pages_visited)
+    visited = {p.rstrip("/") for p in explored.pages_visited}
+    assert {f"{app.url}/customers", f"{app.url}/quotes",
+            f"{app.url}/schedule", f"{app.url}/payments"} <= visited
+
+    # And it found the endpoints behind those screens, which one page did not.
+    endpoints = {c.pattern.split("/api/v2/")[-1].split("?")[0]
+                 for c in explored.api_calls}
+    assert {"customers", "quotes", "appointments", "payments"} <= endpoints
+    assert len(explored.api_calls) > len(plain.api_calls)
+
+
+def test_explore_never_follows_a_destructive_link(app, session):
+    """It is signed in to a live quoting and payments system.
+
+    Following 'Delete quote' or 'Refund' would not be a crawl, it would be an
+    incident. Logging itself out would end the run.
+    """
+    report = capture(app.url, ["/"], har_path=None, wait_ms=1000, scroll=False,
+                     session=session, explore=True, max_pages=25, depth=2)
+
+    visited = " ".join(report.pages_visited)
+    for forbidden in ("delete", "/send", "refund", "archive",
+                      "logout", "subscriptions"):
+        assert forbidden not in visited, f"explore followed a {forbidden} link"
+
+    # The fixture shouts if a destructive route is ever reached.
+    assert not any("DESTRUCTIVE" in (c.sample or "") for c in report.calls)
+
+    # ...and it says what it declined to touch, rather than skipping silently.
+    reasons = {s.url.replace(app.url, ""): s.reason for s in report.skipped_links}
+    assert "/quotes/9001/delete" in reasons
+    assert "/logout" in reasons
+    assert reasons["/customers/5001/archive"] == "has a confirmation prompt"
+    assert reasons["/subscriptions/1"] == "data-method=delete"
+    assert "/reports/quotes.pdf" in reasons
+
+
+def test_explore_stays_on_the_site_and_respects_its_limits(app, session):
+    report = capture(app.url, ["/"], har_path=None, wait_ms=800, scroll=False,
+                     session=session, explore=True, max_pages=3, depth=2)
+
+    assert len(report.pages_visited) <= 3
+    assert all(p.startswith(app.url) for p in report.pages_visited)
+    # Off-site and non-page schemes are never queued at all.
+    assert not any("example.org" in p for p in report.pages_visited)
+    assert not any(s.url.startswith("mailto:") for s in report.skipped_links)
+
+
+def test_explore_is_off_unless_asked_for(app, session):
+    report = capture(app.url, ["/"], har_path=None, wait_ms=800, scroll=False,
+                     session=session)
+    assert report.pages_visited == [f"{app.url}/"]
+    assert report.skipped_links == []

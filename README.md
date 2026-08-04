@@ -183,6 +183,29 @@ there.
 attaches and saves it to the session, because cookies alone usually are not
 enough to replay those endpoints — without it every call 401s.
 
+#### Letting it find the screens itself
+
+If you do not know the app's routes, add `--explore` (a checkbox in the
+dashboard). It follows the app's own navigation from wherever you start,
+recording the API behind each screen. Bound it with `--max-pages` and
+`--depth`.
+
+```bash
+make cli CMD="capture https://app.example.com --explore --max-pages 30"
+```
+
+**It will not follow anything that reads as a state change.** It is signed in
+to a live scheduling, quoting and payments system, so following "Delete quote",
+"Refund" or "Email to customer" would not be a crawl, it would be an incident —
+and "Log out" would end the run. Links matching those patterns are skipped, as
+are Rails/Turbo links carrying `data-method` or a confirmation prompt, file
+downloads, and anything off-site. Every skipped link is listed in the report
+with the reason, so nothing is dropped silently.
+
+That is a denylist, so treat it as a strong default rather than a guarantee. If
+the app words its destructive actions unusually, drive it with explicit
+`--path` values instead.
+
 `config/harvest.app.example.yaml` is a worked example covering all four
 pagination styles (page, offset, cursor, POST body).
 
@@ -561,7 +584,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-143 tests, in five groups:
+147 tests, in five groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -579,8 +602,10 @@ make test-local    # on the host
   failing loudly, and the cardholder-data guard — including asserting that no
   PAN appears anywhere in the staging file's bytes.
 - **Capture** — drives real Chromium, signs in, finds the internal API, and
-  checks the config it drafts actually harvests without hand-editing. Skipped
-  automatically when no browser is available.
+  checks the config it drafts actually harvests without hand-editing. Includes
+  an explore pass over a fixture app whose navigation contains Delete, Refund,
+  Email and Log out links, asserting it finds every real screen and touches
+  none of those. Skipped automatically when no browser is available.
 - **The dashboard** — weighted towards what would actually hurt: that a
   supplied password never reaches the session file, the job log or a page,
   that session values never reach the HTML or the JSON API, that database
