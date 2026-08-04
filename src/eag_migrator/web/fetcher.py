@@ -55,6 +55,7 @@ class FetchStats:
     requests: int = 0
     cache_hits: int = 0
     errors: int = 0
+    unauthorized: int = 0
     blocked_by_robots: list[str] = field(default_factory=list)
 
 
@@ -69,6 +70,7 @@ class Fetcher:
         respect_robots: bool = True,
         timeout: float = 20.0,
         use_cache: bool = True,
+        session: Any = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.origin = f"{urlparse(self.base_url).scheme}://{urlparse(self.base_url).netloc}"
@@ -81,18 +83,29 @@ class Fetcher:
             cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.stats = FetchStats()
+        self.session = session
         self._last_request = 0.0
         self._robots: urllib.robotparser.RobotFileParser | None = None
         self._robots_loaded = False
 
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        if session is not None:
+            headers.update(session.as_request_headers())
+
         self.client = httpx.Client(
-            headers={
-                "User-Agent": user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            headers=headers,
             timeout=timeout,
             follow_redirects=True,
+        )
+
+    @property
+    def authenticated(self) -> bool:
+        return self.session is not None and bool(
+            self.session.cookies or self.session.headers
         )
 
     # --- robots -------------------------------------------------------------
@@ -191,6 +204,9 @@ class Fetcher:
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
 
+        if resp.status in (401, 403):
+            self.stats.unauthorized += 1
+
         if cached and resp.ok:
             cached.write_text(
                 json.dumps(
@@ -204,6 +220,60 @@ class Fetcher:
                 encoding="utf-8",
             )
         return resp
+
+    def post_json(self, url: str, payload: dict[str, Any]) -> Response:
+        """For APIs that paginate over POST, and for GraphQL."""
+        full = urljoin(self.base_url + "/", url) if not url.startswith("http") else url
+
+        cached = None
+        if self.cache_dir and self.use_cache:
+            digest = hashlib.sha256(
+                (full + json.dumps(payload, sort_keys=True)).encode("utf-8")
+            ).hexdigest()[:24]
+            cached = self.cache_dir / f"post-{digest}.json"
+            if cached.exists():
+                data = json.loads(cached.read_text(encoding="utf-8"))
+                self.stats.cache_hits += 1
+                return Response(
+                    data["url"], data["status"], data["headers"], data["text"], from_cache=True
+                )
+
+        self._throttle()
+        try:
+            raw = self.client.post(full, json=payload)
+        except httpx.HTTPError as exc:
+            self.stats.errors += 1
+            return Response(full, 0, {}, f"{type(exc).__name__}: {exc}")
+
+        self.stats.requests += 1
+        resp = Response(
+            url=str(raw.url),
+            status=raw.status_code,
+            headers={k.lower(): v for k, v in raw.headers.items()},
+            text=raw.text,
+        )
+        if resp.status in (401, 403):
+            self.stats.unauthorized += 1
+        if cached and resp.ok:
+            cached.write_text(
+                json.dumps(
+                    {"url": resp.url, "status": resp.status,
+                     "headers": resp.headers, "text": resp.text}
+                ),
+                encoding="utf-8",
+            )
+        return resp
+
+    def robots_blocks_base(self) -> bool:
+        """Does robots.txt disallow the app itself?
+
+        Apps routinely `Disallow: /` because they do not want search engines
+        indexing a logged-in area. That rule addresses crawlers of public
+        content, not an authenticated user exporting their own records — but
+        it is the operator's stated preference, so surface it rather than
+        quietly deciding either way.
+        """
+        return self.respect_robots and not self.allowed(self.base_url + "/")
 
     def _throttle(self) -> None:
         interval = max(self.min_interval, self.crawl_delay())

@@ -11,6 +11,8 @@
 # Harvested site content and the HTTP cache — the client's data, not ours.
 /state/staging.sqlite*
 /state/webcache/
+# Live credentials to the v2 app. Never commit.
+/state/session.json
 !**/.gitkeep
 
 # Database dumps — these are production data, keep them out of git

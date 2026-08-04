@@ -1,0 +1,168 @@
+# ---------------------------------------------------------------------------
+# Example harvest config for an APPLICATION behind a login — scheduling,
+# quoting, payments. This is the shape EAG v2 actually is.
+#
+# `eagm capture <url> --path /customers --path /quotes` generates a draft of
+# this from the endpoints the app calls to render its own screens. That is the
+# real export path: already paginated, already typed, already scoped to your
+# account.
+#
+# Copy to config/harvest.yaml to use it.
+# ---------------------------------------------------------------------------
+version: 1
+
+site:
+  base_url: https://app.example.com
+  requires_auth: true        # harvest refuses to run without a session
+  rate_limit_rps: 1.0        # an internal API is not built for a firehose
+  respect_robots: false      # apps Disallow: / for search engines; see README
+  max_pages: 5000
+
+collections:
+  # --- page-number pagination ---------------------------------------------
+  - name: customers
+    key: id                  # dedupes re-harvests; without it rows duplicate
+    discover:
+      api:
+        url: https://app.example.com/api/v2/customers
+        style: page          # page | offset | cursor | single
+        page_param: page
+        per_page_param: per_page
+        per_page: 100
+        record_path: data    # the list is at {"data": [...]}
+    extract:
+      type: json
+      fields:
+        - to: id
+          path: id
+        - to: name
+          path: name
+        - to: email
+          path: email
+        - to: phone
+          path: phone
+        - to: created_at
+          path: created_at
+
+  # --- offset/limit pagination, with nested objects ------------------------
+  - name: quotes
+    key: id
+    discover:
+      api:
+        url: https://app.example.com/api/v2/quotes
+        style: offset
+        offset_param: offset
+        per_page_param: limit
+        per_page: 100
+        record_path: data
+    extract:
+      type: json
+      fields:
+        - to: id
+          path: id
+        # A nested object stored whole becomes JSON text. Usually you want a
+        # dotted path to pull the useful part out flat instead.
+        - to: customer_id
+          path: customer.id
+        - to: customer_name
+          path: customer.name
+        - to: vin
+          path: vin
+        - to: nags_part
+          path: nags_part
+        - to: total
+          path: total
+        - to: status
+          path: status
+
+  # --- cursor pagination ---------------------------------------------------
+  - name: appointments
+    key: id
+    discover:
+      api:
+        url: https://app.example.com/api/v2/appointments
+        style: cursor
+        cursor_param: cursor
+        cursor_path: meta.next_cursor   # where the next cursor lives
+        per_page_param: limit
+        per_page: 100
+        record_path: data
+    extract:
+      type: json
+      fields:
+        - to: id
+          path: id
+        - to: quote_id
+          path: quote_id
+        - to: technician
+          path: technician
+        - to: starts_at
+          path: starts_at
+        - to: duration_min
+          path: duration_min
+        - to: state
+          path: state
+
+  # --- a POST search/list endpoint ----------------------------------------
+  - name: invoices
+    key: id
+    discover:
+      api:
+        url: https://app.example.com/api/v2/search
+        method: POST
+        body: {type: invoice}   # paging keys are added automatically
+        style: page
+        per_page: 100
+        record_path: results
+    extract:
+      type: json
+      fields:
+        - to: id
+          path: id
+        - to: number
+          path: number
+        - to: total
+          path: total
+
+  # --- payments: what NOT to take -----------------------------------------
+  # Card numbers and CVVs are blocked at the staging layer whatever this file
+  # says, so a mistake here cannot put cardholder data on disk. Take the
+  # processor's token and the last four; that is all a v3 system should hold.
+  - name: payments
+    key: id
+    discover:
+      api:
+        url: https://app.example.com/api/v2/payments
+        style: page
+        per_page: 100
+        record_path: data
+    extract:
+      type: json
+      fields:
+        - to: id
+          path: id
+        - to: quote_id
+          path: quote_id
+        - to: amount
+          path: amount
+        - to: currency
+          path: currency
+        - to: processor
+          path: processor
+        - to: processor_ref      # the token — this is the useful part
+          path: processor_ref
+        - to: card_brand
+          path: card_brand
+        - to: card_last4
+          path: card_last4
+        - to: paid_at
+          path: paid_at
+
+# After harvesting:
+#
+#   export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+#   eagm discover --side v2 && eagm scaffold
+#
+# The staging database is an ordinary v2 database from here on. Cleaning the
+# values up is the mapping's job — `phone`, `vin`, `nags`, `decimal`,
+# `to_datetime` and the rest all apply as normal.

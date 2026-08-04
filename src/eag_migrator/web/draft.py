@@ -8,8 +8,10 @@ and marks every one of them as needing a look.
 
 from __future__ import annotations
 
+import json
 import re
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .harvest import (
     ApiDiscovery,
@@ -90,6 +92,162 @@ def _ident(value: str) -> str:
     if slug[0].isdigit():
         slug = f"c_{slug}"
     return slug
+
+
+# Endpoints that are plumbing, not business records.
+PLUMBING = re.compile(
+    r"/(me|session|whoami|auth|token|refresh|csrf|config|settings|feature|flags|"
+    r"health|ping|ready|version|telemetry|analytics|track|log|metrics|notification)s?"
+    r"(/|$|\?)",
+    re.IGNORECASE,
+)
+
+# Field names that identify a record, in preference order.
+KEY_CANDIDATES = ("id", "uuid", "guid", "_id", "number", "reference", "ref", "code")
+
+
+def _collection_name(url: str) -> str:
+    """Name a collection after the last meaningful path segment."""
+    path = urlparse(url).path.strip("/")
+    parts = [p for p in path.split("/") if p and not p.isdigit()]
+    # Drop API version and namespace noise: /api/v2/quotes -> quotes
+    while parts and re.fullmatch(r"api|v\d+|rest|graphql|public|internal", parts[0], re.I):
+        parts.pop(0)
+    return _ident(parts[-1] if parts else "records")
+
+
+def _strip_params(url: str, names: set[str]) -> str:
+    parsed = urlparse(url)
+    kept = [(k, v) for k, v in parse_qsl(parsed.query) if k.lower() not in names]
+    query = urlencode(kept)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", query, ""))
+
+
+def draft_from_capture(report: Any, base_url: str) -> tuple[HarvestConfig, list[str]]:
+    """Build a harvest config from the endpoints the app called itself.
+
+    For an application — scheduling, quoting, payments — this is the real
+    export path. The endpoints the UI uses to render its own list screens are
+    already paginated, already typed, and already scoped to the account.
+    """
+    warnings: list[str] = []
+    collections: list[Collection] = []
+    seen_names: set[str] = set()
+
+    list_calls = [
+        c
+        for c in report.api_calls
+        if c.item_count and c.item_count > 0 and not PLUMBING.search(c.url)
+    ]
+    detail_calls = [
+        c for c in report.api_calls if c.item_count is None and not PLUMBING.search(c.url)
+    ]
+
+    for call in list_calls:
+        pagination = dict(call.pagination)
+        style = pagination.pop("style", None)
+        observed = pagination.pop("observed_per_page", None)
+
+        consumed = {
+            v.lower()
+            for k, v in pagination.items()
+            if k.endswith("_param") and isinstance(v, str)
+        }
+        clean_url = _strip_params(call.url, consumed)
+
+        api_kwargs: dict[str, Any] = {"url": clean_url, "record_path": call.record_path}
+        if call.method == "POST":
+            api_kwargs["method"] = "POST"
+            try:
+                body = json.loads(call.request_body or "{}")
+            except ValueError:
+                body = {}
+            # Drop the paging keys — the harvester sets those itself each page.
+            api_kwargs["body"] = (
+                {k: v for k, v in body.items() if k.lower() not in consumed}
+                if isinstance(body, dict)
+                else {}
+            )
+
+        if style:
+            api_kwargs["style"] = style
+            api_kwargs.update(pagination)
+            api_kwargs["per_page"] = observed or 100
+        else:
+            api_kwargs["style"] = "page"
+            warnings.append(
+                f"{clean_url}: no pagination parameters were visible in the request. "
+                f"It may return everything at once (set style: single) or paginate "
+                f"a way this could not see — check the response for a total count."
+            )
+
+        name = _collection_name(call.url)
+        base, i = name, 2
+        while name in seen_names:
+            name = f"{base}_{i}"
+            i += 1
+        seen_names.add(name)
+
+        available = list(call.response_keys)
+        key = next((k for k in KEY_CANDIDATES if k in available), None)
+        if not key:
+            warnings.append(
+                f"{name}: no obvious id field in {available[:8]} — set `key:` so "
+                f"re-harvesting updates rows instead of duplicating them."
+            )
+
+        fields = [FieldSpec(to=_ident(k), path=k) for k in available]
+        nested = [
+            f.to
+            for f, k in zip(fields, available)
+            if isinstance(call.sample, dict) and isinstance(call.sample.get(k), (dict, list))
+        ]
+        if nested:
+            warnings.append(
+                f"{name}: {', '.join(nested)} are nested objects, stored as JSON. "
+                f"Use a dotted path (e.g. customer.email) to pull out what you need."
+            )
+
+        collections.append(
+            Collection(
+                name=name,
+                key=key,
+                discover=Discovery(api=ApiDiscovery(**api_kwargs)),
+                extract=Extract(type="json", fields=fields),
+                note=(
+                    f"From a {call.method} the app made itself; the first page held "
+                    f"{call.item_count} record(s). Confirm the pagination before a full run."
+                ),
+            )
+        )
+
+    if detail_calls:
+        warnings.append(
+            "Detail endpoints seen but not drafted (they return one record, so they "
+            "need an id from a list collection): "
+            + ", ".join(sorted({c.pattern for c in detail_calls}))[:400]
+        )
+
+    if not collections:
+        warnings.append(
+            "No list endpoints were captured. Drive more of the app with repeated "
+            "--path options (the customers list, the quotes list, the schedule) so "
+            "there is something to record."
+        )
+
+    parsed = urlparse(base_url)
+    config = HarvestConfig(
+        version=1,
+        site=Site(
+            base_url=f"{parsed.scheme}://{parsed.netloc}",
+            rate_limit_rps=1.0,
+            respect_robots=False,
+            requires_auth=True,
+            max_pages=5000,
+        ),
+        collections=collections,
+    )
+    return config, warnings
 
 
 def draft_config(profile: SiteProfile) -> tuple[HarvestConfig, list[str]]:

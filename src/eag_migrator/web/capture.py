@@ -22,6 +22,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
 MAX_BODY = 200_000
+# Headers that carry authentication and must be replayed to reach the API,
+# but must never be written to a report file.
+AUTH_HEADERS = {"authorization", "x-csrf-token", "x-xsrf-token", "x-api-key",
+                "x-auth-token", "x-requested-with", "x-tenant-id", "x-account-id"}
 INTERESTING_TYPES = {"xhr", "fetch", "websocket", "eventsource"}
 STATIC_EXT = re.compile(
     r"\.(png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|css|mp4|webm|m4a|mp3)(\?|$)", re.I
@@ -84,6 +88,10 @@ class CapturedCall:
     sample: Any = None
     is_graphql: bool = False
     operation: str | None = None
+    pagination: dict[str, Any] = field(default_factory=dict)
+    """Inferred pagination shape, if the query string gives it away."""
+    record_path: str = ""
+    """Dotted path to the list inside the response, e.g. 'data'."""
 
     @property
     def is_json(self) -> bool:
@@ -98,13 +106,19 @@ class CaptureReport:
     calls: list[CapturedCall] = field(default_factory=list)
     har_path: str | None = None
     notes: list[str] = field(default_factory=list)
+    auth_headers: dict[str, str] = field(default_factory=dict)
+    """Auth-bearing headers the app's own JS sent. Never written to disk."""
+    authenticated: bool = False
 
     @property
     def api_calls(self) -> list[CapturedCall]:
         return [c for c in self.calls if c.is_json or c.is_graphql]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Bearer tokens and session cookies must not land in reports/.
+        data["auth_headers"] = sorted(self.auth_headers)
+        return data
 
 
 def _pattern(url: str) -> str:
@@ -122,18 +136,65 @@ def _pattern(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, path, "", query, ""))
 
 
-def _summarise(payload: Any) -> tuple[list[str], int | None, Any]:
+PAGE_PARAMS = {"page", "p", "pagenumber", "page_number", "pagina"}
+PER_PAGE_PARAMS = {"per_page", "perpage", "limit", "page_size", "pagesize", "size", "take", "count"}
+OFFSET_PARAMS = {"offset", "skip", "start", "from"}
+CURSOR_PARAMS = {"cursor", "after", "next", "next_cursor", "page_token", "continuation"}
+
+
+def _infer_pagination(url: str, body: Any = None) -> dict[str, Any]:
+    """Read the pagination style off whatever the app actually sent.
+
+    Query string for GETs; the JSON body for POST search/list endpoints, which
+    is where those keep their paging.
+    """
+    params = {k.lower(): str(v) for k, v in parse_qsl(urlparse(url).query)}
+    if isinstance(body, dict):
+        params.update(
+            {k.lower(): str(v) for k, v in body.items()
+             if isinstance(v, (str, int, float))}
+        )
+    if not params:
+        return {}
+
+    per_page = next((k for k in params if k in PER_PAGE_PARAMS), None)
+    found: dict[str, Any] = {}
+
+    cursor = next((k for k in params if k in CURSOR_PARAMS), None)
+    page = next((k for k in params if k in PAGE_PARAMS), None)
+    offset = next((k for k in params if k in OFFSET_PARAMS), None)
+
+    if cursor:
+        found = {"style": "cursor", "cursor_param": cursor}
+    elif page:
+        found = {"style": "page", "page_param": page}
+    elif offset:
+        found = {"style": "offset", "offset_param": offset}
+    elif per_page:
+        found = {"style": "page", "page_param": "page"}
+
+    if found and per_page:
+        found["per_page_param"] = per_page
+        raw = params.get(per_page, "")
+        if raw.isdigit():
+            found["observed_per_page"] = int(raw)
+    return found
+
+
+def _summarise(payload: Any) -> tuple[list[str], int | None, Any, str]:
+    """Returns (field names, item count, sample record, path to the list)."""
     if isinstance(payload, list):
         first = payload[0] if payload else None
         keys = sorted(first.keys()) if isinstance(first, dict) else []
-        return keys, len(payload), first
+        return keys, len(payload), first, ""
     if isinstance(payload, dict):
-        for wrapper in ("data", "items", "results", "products", "records", "hits", "edges"):
+        for wrapper in ("data", "items", "results", "records", "rows", "hits",
+                        "edges", "content", "products", "list"):
             inner = payload.get(wrapper)
             if isinstance(inner, list) and inner and isinstance(inner[0], dict):
-                return sorted(inner[0].keys()), len(inner), inner[0]
-        return sorted(payload.keys()), None, payload
-    return [], None, payload
+                return sorted(inner[0].keys()), len(inner), inner[0], wrapper
+        return sorted(payload.keys()), None, payload, ""
+    return [], None, payload, ""
 
 
 def capture(
@@ -145,6 +206,7 @@ def capture(
     wait_ms: int = 2500,
     timeout_ms: int = 30_000,
     user_agent: str | None = None,
+    session: Any = None,
 ) -> CaptureReport:
     try:
         from playwright.sync_api import sync_playwright
@@ -158,6 +220,7 @@ def capture(
     report = CaptureReport(
         base_url=base_url,
         generated_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        authenticated=session is not None,
     )
     seen: dict[tuple[str, str], CapturedCall] = {}
 
@@ -184,6 +247,8 @@ def capture(
                 ) from exc
 
         ctx_args: dict[str, Any] = {"ignore_https_errors": True}
+        if session is not None:
+            ctx_args["storage_state"] = session.to_storage_state()
         if user_agent:
             ctx_args["user_agent"] = user_agent
         if har_path:
@@ -221,27 +286,43 @@ def capture(
                 content_type=content_type,
             )
 
+            try:
+                report.auth_headers.update(
+                    {
+                        k: v
+                        for k, v in request.all_headers().items()
+                        if k.lower() in AUTH_HEADERS
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
             post = None
             try:
                 post = request.post_data
             except Exception:  # noqa: BLE001
                 pass
+            parsed_body: Any = None
             if post:
                 call.request_body = post[:2000]
-                if "query" in post and ("{" in post):
+                try:
+                    parsed_body = json.loads(post)
+                except ValueError:
+                    parsed_body = None
+                if "query" in post and "{" in post:
                     call.is_graphql = True
-                    try:
-                        parsed = json.loads(post)
-                        call.operation = parsed.get("operationName")
-                    except ValueError:
-                        pass
+                    if isinstance(parsed_body, dict):
+                        call.operation = parsed_body.get("operationName")
+
+            call.pagination = _infer_pagination(url, parsed_body)
 
             try:
                 body = response.body()
                 call.size = len(body)
                 if "json" in content_type and len(body) <= MAX_BODY:
                     payload = json.loads(body)
-                    call.response_keys, call.item_count, sample = _summarise(payload)
+                    (call.response_keys, call.item_count, sample,
+                     call.record_path) = _summarise(payload)
                     call.sample = _trim(sample)
             except Exception:  # noqa: BLE001 - bodies are often unavailable
                 pass

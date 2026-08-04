@@ -309,7 +309,14 @@ def build_draft(
                     f"in '{target_table}'"
                 )
 
-        for col in table.columns:
+        # Real columns get first pick of the target columns; the harvester's
+        # bookkeeping (`_fetched_at`, `_key`, `_url`) is considered last.
+        # Otherwise `_fetched_at` fuzzy-matches a target `created_at` before
+        # the actual `created_at` is even reached, and every migrated row
+        # silently carries the scrape time as its creation date.
+        ordered_columns = sorted(table.columns, key=lambda c: c.name.startswith("_"))
+
+        for col in ordered_columns:
             if key_is_generated and col.name == legacy_source:
                 continue  # already routed to the legacy column above
 

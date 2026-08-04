@@ -15,9 +15,10 @@ driven entirely by `config/mapping.yaml`.
 
 **If you can reach v2's database or API**, go to [Quick start](#quick-start).
 
-**If you cannot** — no credentials, no DB access, just the public website —
-read the site instead. See [No database, no API](#no-database-no-api). It
-harvests the live site into a local staging database, and from there the
+**If you cannot** — no credentials, no DB access, only a login to the app
+itself — read v2 over HTTP instead. See
+[No database, no API](#no-database-no-api). It signs in, finds the app's own
+internal API, and harvests it into a local staging database; from there the
 pipeline below is identical.
 
 ## What you need to supply
@@ -34,11 +35,16 @@ The tool discovers the rest, but it cannot invent these:
 Credentials go in `.env`, which is gitignored. Do not commit dumps or harvested
 content — `db/*-seed/` and `state/` are gitignored for the same reason.
 
-> **Before harvesting a site you do not own**, get the owner's written
-> authorisation and check their terms of service. The tool obeys `robots.txt`,
-> honours `Crawl-delay`, rate-limits to 1 request/second by default, identifies
-> itself in the User-Agent, and caches every response so re-runs generate no
-> new traffic — but none of that is a substitute for permission.
+> **Before extracting from a system you do not own**, get written
+> authorisation from whoever is accountable for the account, and check the
+> vendor's terms of service. This matters more here than for a marketing site:
+> the records are customer PII and payment history. If EAG owns the account and
+> is leaving a vendor who will not provide an export, that is a normal
+> migration — but it is EAG's authorisation to give.
+>
+> The tool is built to behave: it rate-limits, identifies itself, caches every
+> response so re-runs generate no new traffic, and refuses to store cardholder
+> data. None of that is a substitute for permission.
 
 ---
 
@@ -89,20 +95,83 @@ v3-mysql `13307`, adminer `18080`.
 
 ## No database, no API
 
-When the only thing you can reach is the public site, three commands stand in
-front of the normal pipeline:
+When the only thing you can reach is the site itself, a few commands stand in
+front of the normal pipeline. **Which ones depends on whether v2 is a public
+site or an application behind a login.**
+
+### If v2 is an application (scheduling, quoting, payments)
+
+This is the EAG case. The data is behind a login, and the way in is the app's
+own internal API — the endpoints it calls to render its own list screens.
+Those are already paginated, already typed, and already scoped to the account.
+
+```bash
+# 1. Sign in with your own browser, copy the Cookie header from devtools:
+eagm login https://app.example.com --cookies 'sid=…; csrf=…'
+
+# 2. Drive the screens you care about and record what they call:
+eagm capture https://app.example.com \
+     --path /customers --path /quotes --path /schedule
+
+# 3. Review config/harvest.draft.yaml — capture wrote it from the endpoints
+#    it saw, including their pagination style — then:
+mv config/harvest.draft.yaml config/harvest.yaml
+eagm harvest
+
+# 4. From here it is an ordinary v2 database:
+export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+eagm discover --side v2 && eagm scaffold && eagm plan && eagm run && eagm verify
+```
+
+`eagm capture` also picks up the CSRF or bearer header the app's JavaScript
+attaches and saves it to the session, because cookies alone usually are not
+enough to replay those endpoints — without it every call 401s.
+
+`config/harvest.app.example.yaml` is a worked example covering all four
+pagination styles (page, offset, cursor, POST body).
+
+#### Authentication
+
+Three ways, in order of preference:
+
+| | How | When |
+|---|---|---|
+| **Cookie import** | `eagm login <url> --cookies 'sid=…'` | Default. Sign in yourself; no password is ever handled here. Also accepts a path to a cookie-manager JSON export. |
+| **Bearer token** | `EAGM_AUTH_TOKEN=…` | The app issues API tokens. |
+| **Form login** | `eagm login <url> --form` with `EAGM_USERNAME`/`EAGM_PASSWORD` | Unattended runs only. Drives the real login page, so it survives CSRF tokens and JS-built forms — but not MFA. |
+
+The session is written to `state/session.json` mode 0600 and gitignored. It is
+live credentials to a system holding customer data: **delete it when the
+migration is done.** Nothing prints cookie or token values, including the
+reports.
+
+If a session expires mid-harvest the run stops with a clear error rather than
+quietly storing a wall of login pages.
+
+#### robots.txt and authenticated apps
+
+Applications routinely `Disallow: /` so search engines do not index a
+logged-in area. That rule addresses crawlers of public content, not an
+authenticated user exporting their own records — but it is still the
+operator's stated preference, so nothing here decides for you. Set
+`respect_robots: false` in the harvest config deliberately, and the run
+records that you did.
+
+### If v2 is a public site
 
 ```bash
 eagm recon https://the-v2-site.example    # what is it? does it already expose JSON?
 eagm capture https://the-v2-site.example  # what does it call at runtime?
-# --- review config/harvest.draft.yaml, then: ---
 mv config/harvest.draft.yaml config/harvest.yaml
-eagm harvest                              # -> state/staging.sqlite
+eagm harvest
 
-# From here it is an ordinary v2 database:
 export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
 eagm discover --side v2 && eagm scaffold && eagm plan && eagm run && eagm verify
 ```
+
+`recon` tells you which case you are in: if the front door is a login screen it
+says so and stops, rather than profiling the login page and reporting "no JSON
+API found" as though that meant something.
 
 ### Scraping HTML is the last resort
 
@@ -150,6 +219,31 @@ Every request goes through one client that obeys `robots.txt` (including
 response to disk**. Iterating on selectors costs the site nothing, because the
 second run reads from `state/webcache/`. A URL disallowed by `robots.txt` is
 never fetched, even if it appears in the sitemap.
+
+### Cardholder data is blocked, not trusted to the config
+
+v2 takes payments, so a careless selector on a payments screen could drag PANs
+and CVVs into a SQLite file on a laptop and pull the whole project into PCI DSS
+scope. That is prevented at the staging layer, where no mapping mistake can
+reach:
+
+- **CVV/CVC, PINs and track data** are dropped entirely. PCI DSS forbids
+  retaining them after authorisation, in any form.
+- **Card and bank account numbers** are reduced to their last four digits.
+- **A card number in a field nobody thought to name carefully** — a PAN typed
+  into a free-text note on a quote — is caught by a value-level sweep, using a
+  Luhn check plus a card-issuer prefix so job numbers are not false-flagged.
+
+What survives is what a v3 system should actually hold: the processor's token,
+the brand, the last four. The harvest report lists exactly what was removed.
+
+The same report lists the **personal data** each collection contains, for your
+processing record or DPA. That detection is deliberately narrow — on a
+scheduling record `state` means "scheduled", not a US state, and a report full
+of false positives is one nobody reads.
+
+This is a safety net, not a compliance programme. Migrating a payments system
+is still a conversation with whoever is accountable for that data.
 
 ### The staging database
 
@@ -330,8 +424,9 @@ the sink interface, so it stays reversible.
 | Command | Purpose |
 |---|---|
 | `eagm doctor` | Check both connections and show where state and config live |
-| `eagm recon <url>` | Inspect the live v2 site; draft a harvest config |
-| `eagm capture <url>` | Record the network calls the site makes (needs Chromium) |
+| `eagm login <url>` | Store an authenticated session for the v2 app |
+| `eagm recon <url>` | Inspect the live v2 site; detect a login wall |
+| `eagm capture <url>` | Record the app's own API calls and draft a harvest config |
 | `eagm harvest` | Pull the site into `state/staging.sqlite` |
 | `eagm staging` | Show what is in the staging database |
 | `eagm discover --side both` | Introspect and profile the databases |
@@ -357,20 +452,26 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-74 tests, in three groups:
+105 tests, in four groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
   an auto glass shop: customers → vehicles → work orders, with the messy data
   you would expect (zero-dates, `$1,250.00`, `Y`/`N` flags, lowercase VINs,
   HTML in notes, a soft-deleted row, a row with no email).
-- **The web path** — recon, drafting, extraction and harvesting against a fake
-  WordPress auto-glass site **served over real HTTP**, with a real
-  `robots.txt`, a real sitemap and real `X-WP-Total` pagination. Includes a
-  test that a `robots.txt`-disallowed URL in the sitemap is never fetched.
-- **Capture** — drives real Chromium against a client-rendered page and
-  asserts the XHR behind it is found. Skipped automatically when no browser is
-  available.
+- **The public-site path** — recon, drafting, extraction and harvesting
+  against a fake WordPress auto-glass site **served over real HTTP**, with a
+  real `robots.txt`, a real sitemap and real `X-WP-Total` pagination. Includes
+  a test that a `robots.txt`-disallowed URL in the sitemap is never fetched.
+- **The application path** — a fake scheduling/quoting/payments app behind a
+  login, also over real HTTP: a session cookie plus a CSRF header, an app shell
+  that renders nothing until its XHRs land, and all four pagination styles.
+  Covers the login wall (anonymous requests get no data), expired sessions
+  failing loudly, and the cardholder-data guard — including asserting that no
+  PAN appears anywhere in the staging file's bytes.
+- **Capture** — drives real Chromium, signs in, finds the internal API, and
+  checks the config it drafts actually harvests without hand-editing. Skipped
+  automatically when no browser is available.
 
 The database tests run on SQLite so no containers are needed, but the engine is
 dialect-agnostic — all database access goes through SQLAlchemy.
@@ -387,6 +488,7 @@ reports/                   plan/run/verify/capture output (gitignored)
 state/migration.sqlite     checkpoints, id map, rollback journal (gitignored)
 state/staging.sqlite       harvested site content (gitignored)
 state/webcache/            cached HTTP responses (gitignored)
+state/session.json         v2 app credentials, mode 0600 (gitignored)
 db/v2-seed/, db/v3-seed/   drop .sql dumps here (gitignored)
 src/eag_migrator/
   discovery.py             schema introspection and fingerprinting
@@ -398,8 +500,11 @@ src/eag_migrator/
   state.py                 checkpoints, id map, journal
   adapters/                SQL source, SQL sink, HTTP API sink
   web/
-    fetcher.py             the polite HTTP client: robots, rate limit, cache
-    recon.py               platform fingerprinting and API discovery
+    fetcher.py             the HTTP client: auth, robots, rate limit, cache
+    session.py             authenticated sessions
+    login.py               cookie import and form login
+    safety.py              cardholder-data guard, PII reporting
+    recon.py               platform fingerprinting, login-wall and API discovery
     capture.py             browser-driven network capture
     draft.py               draft-harvest-config generator
     extract.py             CSS / JSON-path / JSON-LD extraction

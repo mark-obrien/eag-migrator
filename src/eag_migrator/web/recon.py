@@ -132,6 +132,9 @@ class SiteProfile:
     jsonld_types: dict[str, int] = field(default_factory=dict)
     jsonld_samples: list[dict[str, Any]] = field(default_factory=list)
     embedded_state: list[str] = field(default_factory=list)
+    requires_auth: bool = False
+    auth_evidence: list[str] = field(default_factory=list)
+    authenticated: bool = False
     robots_blocked: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -263,6 +266,20 @@ def recon(
 
     soup = BeautifulSoup(home.text, "lxml")
 
+    # --- is this an application behind a login? -----------------------------
+    profile.authenticated = fetcher.authenticated
+    if not fetcher.authenticated:
+        profile.requires_auth, profile.auth_evidence = _detect_login_wall(
+            soup, home, base
+        )
+        if profile.requires_auth:
+            profile.notes.append(
+                "This is an application behind a login, not a public site. "
+                "Crawling it anonymously will only ever collect the login page. "
+                "Authenticate with `eagm login`, then run `eagm capture` while "
+                "signed in to find the API the app uses for its own screens."
+            )
+
     # --- platform -----------------------------------------------------------
     profile.platforms = _detect_platforms(home.text, home.headers)
     gen = soup.find("meta", attrs={"name": "generator"})
@@ -291,6 +308,13 @@ def recon(
             "JSON-LD on the homepage already carries structured business data: "
             + ", ".join(sorted(valuable))
         )
+
+    if profile.requires_auth:
+        # Everything past this point would be describing the login page. Saying
+        # "no JSON API found" about an app you have not signed into is worse
+        # than saying nothing — it reads like a finding.
+        profile.robots_blocked = list(fetcher.stats.blocked_by_robots)
+        return profile
 
     # --- robots + sitemaps --------------------------------------------------
     declared = fetcher.sitemaps()
@@ -359,6 +383,42 @@ def recon(
         )
 
     return profile
+
+
+LOGIN_HINTS = re.compile(
+    r"\b(sign in|signin|log ?in|password|forgot your password|remember me|"
+    r"two.factor|authenticate)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_login_wall(soup: BeautifulSoup, home: Any, base: str) -> tuple[bool, list[str]]:
+    """Is the front door a login screen?"""
+    evidence: list[str] = []
+
+    if soup.find("input", attrs={"type": "password"}):
+        evidence.append("a password input on the landing page")
+
+    final = (home.url or "").lower()
+    if re.search(r"/(login|signin|sign-in|auth|account/login|sso)", final):
+        if final.rstrip("/") != base.rstrip("/").lower():
+            evidence.append(f"redirected to {home.url}")
+        else:
+            evidence.append("landing URL looks like a login endpoint")
+
+    title = (soup.title.get_text(strip=True) if soup.title else "") or ""
+    if LOGIN_HINTS.search(title):
+        evidence.append(f"page title: {title!r}")
+
+    if home.status in (401, 403):
+        evidence.append(f"homepage returned HTTP {home.status}")
+
+    # A very small page with a login link and nothing else.
+    text = soup.get_text(" ", strip=True)
+    if len(text) < 2000 and LOGIN_HINTS.search(text) and not soup.find_all("article"):
+        evidence.append("landing page is a short page dominated by sign-in wording")
+
+    return bool(evidence), evidence
 
 
 def _enumerate_wordpress(fetcher: Fetcher, profile: SiteProfile) -> None:
@@ -443,6 +503,19 @@ def render_markdown(profile: SiteProfile) -> str:
     lines.append(f"- HTTP status: {profile.status}")
     lines.append(f"- Generated: {profile.generated_at}")
     lines.append(f"- URLs discovered: **{len(profile.urls):,}**\n")
+
+    if profile.requires_auth:
+        lines.append("## Authentication required\n")
+        lines.append("This is an application behind a login. Evidence:\n")
+        for item in profile.auth_evidence:
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("Anonymous crawling will collect nothing but the login page.")
+        lines.append("Authenticate first:\n")
+        lines.append("```bash")
+        lines.append("eagm login <url> --cookies 'session=...'   # from your own browser")
+        lines.append("eagm capture <url> --path /customers --path /quotes --draft")
+        lines.append("```\n")
 
     lines.append("## Platform\n")
     if profile.generator:

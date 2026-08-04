@@ -494,6 +494,118 @@ def export_profile(
 HARVEST_CONFIG = CONFIG_DIR / "harvest.yaml"
 STAGING_DB = STATE_DIR / "staging.sqlite"
 WEB_CACHE = STATE_DIR / "webcache"
+SESSION_FILE = STATE_DIR / "session.json"
+
+
+def _load_session(origin: str, required: bool = False):
+    """Stored session, else EAGM_AUTH_TOKEN / EAGM_COOKIE, else nothing."""
+    from .web.session import Session
+
+    if SESSION_FILE.exists():
+        session = Session.load(SESSION_FILE)
+        if session.age_hours > 12:
+            console.print(
+                f"[yellow]Session is {session.age_hours:.0f}h old — if calls start "
+                f"returning 401, re-run `eagm login`.[/yellow]"
+            )
+        return session
+
+    session = Session.from_env(origin)
+    if session:
+        console.print("[dim]using credentials from the environment[/dim]")
+        return session
+
+    if required:
+        console.print(
+            "[red]No session.[/red] This app needs a login. Run:\n"
+            "  [bold]eagm login <url> --cookies '<paste the Cookie header>'[/bold]"
+        )
+        raise typer.Exit(1)
+    return None
+
+
+@app.command()
+def login(
+    url: str = typer.Argument(..., help="The v2 app, e.g. https://app.example.com"),
+    cookies: Optional[str] = typer.Option(
+        None,
+        "--cookies",
+        help="A raw Cookie header, or a path to a cookie/storage-state JSON export",
+    ),
+    form: bool = typer.Option(
+        False, "--form", help="Drive the login form (needs EAGM_USERNAME/EAGM_PASSWORD)"
+    ),
+    login_url: str = typer.Option("/login", help="--form only: the login page"),
+    success_selector: Optional[str] = typer.Option(
+        None, help="--form only: a selector that only exists once signed in"
+    ),
+    check: bool = typer.Option(True, help="Verify the session actually works"),
+) -> None:
+    """Store an authenticated session for the v2 app.
+
+    Prefer --cookies: sign in with your own browser, copy the Cookie header
+    from devtools, and no password is ever handled here. --form is for
+    unattended runs.
+    """
+    _settings()
+    from .web.fetcher import Fetcher
+    from .web.login import LoginFailed, LoginSpec, form_login, import_session
+
+    if not cookies and not form:
+        console.print(
+            "Give it a session one of two ways:\n\n"
+            "  [bold]1. Import from your browser (recommended)[/bold]\n"
+            "     Sign in normally, open devtools → Network → any request →\n"
+            "     copy the [bold]Cookie[/bold] request header, then:\n"
+            f"       eagm login {url} --cookies 'sid=abc; csrf=xyz'\n\n"
+            "     Or export cookies to JSON with a cookie-manager extension:\n"
+            f"       eagm login {url} --cookies ./cookies.json\n\n"
+            "  [bold]2. Let the migrator sign in[/bold]\n"
+            "     export EAGM_USERNAME=... EAGM_PASSWORD=...\n"
+            f"       eagm login {url} --form --success-selector '.dashboard'\n"
+        )
+        raise typer.Exit(1)
+
+    try:
+        if form:
+            session = form_login(
+                url,
+                LoginSpec(login_url=login_url, success_selector=success_selector),
+            )
+        else:
+            session = import_session(cookies, url)
+    except LoginFailed as exc:
+        console.print(f"[red]Login failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if not session.cookies and not session.headers:
+        console.print("[red]That produced no cookies or auth headers.[/red]")
+        raise typer.Exit(1)
+
+    if check:
+        with Fetcher(url, cache_dir=None, use_cache=False, rate_limit_rps=0,
+                     respect_robots=False, session=session) as fetcher:
+            resp = fetcher.get(url)
+        if resp.status in (401, 403):
+            console.print(
+                f"[red]Session rejected (HTTP {resp.status}).[/red] "
+                f"The cookies may be incomplete — copy the whole Cookie header."
+            )
+            raise typer.Exit(1)
+        if "password" in resp.text.lower() and resp.text.lower().count("password") > 1:
+            console.print(
+                "[yellow]Warning: the response still looks like a login page. "
+                "The session may not be valid.[/yellow]"
+            )
+
+    path = session.save(SESSION_FILE)
+    console.print(f"[green]Session saved[/green] → {path} (mode 0600)")
+    console.print(f"  {session.describe()}")
+    console.print(
+        "\nNext: [bold]eagm capture <url> --path /customers --path /quotes --draft[/bold]\n"
+        "[dim]This file holds live credentials to a system with customer data. "
+        "It is gitignored; delete it when the migration is done.[/dim]"
+    )
 
 
 @app.command()
@@ -515,12 +627,14 @@ def recon(
     from .web.recon import recon as run_recon, render_markdown as render_recon
 
     console.print(f"[bold]Recon:[/bold] {url}")
+    session = _load_session(url)
     with Fetcher(
         url,
         cache_dir=WEB_CACHE,
         rate_limit_rps=rate,
         respect_robots=robots,
         use_cache=not no_cache,
+        session=session,
     ) as fetcher:
         profile = run_recon(fetcher, max_urls=max_urls)
 
@@ -529,6 +643,16 @@ def recon(
 
     if profile.status and not 200 <= profile.status < 300:
         console.print(f"[red]Homepage returned HTTP {profile.status}[/red]")
+
+    if profile.requires_auth:
+        console.print("\n[bold yellow]This is an application behind a login.[/bold yellow]")
+        for item in profile.auth_evidence:
+            console.print(f"  • {item}")
+        console.print(
+            "\nAnonymous crawling will only ever collect the login page. Do this instead:\n"
+            f"  [bold]eagm login {url} --cookies '<Cookie header from your browser>'[/bold]\n"
+            f"  [bold]eagm capture {url} --path /customers --path /quotes --draft[/bold]\n"
+        )
 
     if profile.platforms:
         console.print("  platform: " + ", ".join(p["platform"] for p in profile.platforms))
@@ -557,7 +681,12 @@ def recon(
         console.print(f"  • {note}")
     console.print(f"\n[dim]report: {md}[/dim]")
 
-    if draft:
+    if draft and profile.requires_auth:
+        console.print(
+            "[dim]Skipping the harvest draft — there is nothing to draft from until "
+            "you are signed in.[/dim]"
+        )
+    elif draft:
         from .web.draft import draft_config
         from .web.harvest import dump_config
 
@@ -573,10 +702,11 @@ def recon(
             f"and run [bold]eagm harvest[/bold]"
         )
 
-    console.print(
-        "\n[dim]If the site renders content client-side, run "
-        "`eagm capture <url>` to see the API it calls.[/dim]"
-    )
+    if not profile.requires_auth:
+        console.print(
+            "\n[dim]If the site renders content client-side, run "
+            "`eagm capture <url>` to see the API it calls.[/dim]"
+        )
 
 
 @app.command()
@@ -588,6 +718,12 @@ def capture(
     har: bool = typer.Option(True, help="Also write a HAR file"),
     scroll: bool = typer.Option(True, help="Scroll each page to trigger lazy loading"),
     wait: int = typer.Option(2500, help="Milliseconds to idle on each page"),
+    draft: bool = typer.Option(
+        True, help="Write a harvest config from the endpoints discovered"
+    ),
+    anonymous: bool = typer.Option(
+        False, "--anonymous", help="Ignore any stored session"
+    ),
 ) -> None:
     """Drive a real browser and record the network calls the site makes.
 
@@ -599,7 +735,16 @@ def capture(
     from .web.capture import render_markdown as render_capture
 
     paths = list(path) if path else ["/"]
-    console.print(f"[bold]Capturing:[/bold] {url} ({len(paths)} page(s))")
+    session = None if anonymous else _load_session(url)
+    console.print(
+        f"[bold]Capturing:[/bold] {url} ({len(paths)} page(s))"
+        + (" [green]authenticated[/green]" if session else " [yellow]anonymous[/yellow]")
+    )
+    if not session and not anonymous:
+        console.print(
+            "[dim]No session stored. If this app needs a login, run `eagm login` "
+            "first or you will only record the login screen.[/dim]"
+        )
 
     try:
         report = run_capture(
@@ -608,6 +753,7 @@ def capture(
             har_path=(REPORTS_DIR / "capture.har") if har else None,
             scroll=scroll,
             wait_ms=wait,
+            session=session,
         )
     except BrowserUnavailable as exc:
         console.print(f"[red]{exc}[/red]")
@@ -639,6 +785,33 @@ def capture(
     if report.har_path:
         console.print(f"[dim]HAR:    {report.har_path}[/dim]")
 
+    # An SPA usually sends a bearer or CSRF header its cookies do not carry.
+    # Without adopting it, every replayed call 401s.
+    if session is not None and report.auth_headers:
+        added = session.adopt_headers(report.auth_headers)
+        if added:
+            session.save(SESSION_FILE)
+            console.print(
+                f"[green]Adopted {added} auth header(s) the app's JavaScript sent[/green] "
+                f"— saved to the session so harvest can replay these endpoints."
+            )
+
+    if draft and report.api_calls:
+        from .web.draft import draft_from_capture
+        from .web.harvest import dump_config
+
+        config, warnings = draft_from_capture(report, url)
+        path_out = dump_config(config, CONFIG_DIR / "harvest.draft.yaml")
+        console.print(
+            f"\n[green]Drafted {len(config.collections)} collection(s) → {path_out}[/green]"
+        )
+        for warning in warnings:
+            console.print(f"  [yellow]•[/yellow] {warning}")
+        console.print(
+            f"\nReview it, then: [bold]mv {path_out} {HARVEST_CONFIG}[/bold] "
+            f"and run [bold]eagm harvest[/bold]"
+        )
+
 
 @app.command()
 def harvest(
@@ -648,6 +821,7 @@ def harvest(
     ),
     limit: int = typer.Option(0, help="Stop after N records per collection (0 = all)"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Re-fetch instead of using the cache"),
+    anonymous: bool = typer.Option(False, "--anonymous", help="Ignore any stored session"),
 ) -> None:
     """Pull the v2 site into state/staging.sqlite.
 
@@ -655,11 +829,16 @@ def harvest(
     works exactly as it does against a real database.
     """
     _settings()
-    from .web.harvest import harvest as run_harvest, load_config
+    from .web.harvest import AuthExpired, harvest as run_harvest, load_config
     from .web.harvest import render_markdown as render_harvest
     from .web.staging import Staging
 
     config = load_config(config_file)
+    session = (
+        None
+        if anonymous
+        else _load_session(config.site.base_url, required=config.site.requires_auth)
+    )
     console.print(
         f"[bold]Harvesting[/bold] {config.site.base_url} "
         f"at {config.site.rate_limit_rps}/s"
@@ -669,16 +848,21 @@ def harvest(
     def say(name: str, done: int, total: int) -> None:
         console.print(f"[dim]  {name}: {done:,}/{total:,}[/dim]")
 
-    with Staging(STAGING_DB) as staging:
-        report = run_harvest(
-            config,
-            staging,
-            cache_dir=WEB_CACHE,
-            use_cache=not no_cache,
-            collections=list(collections) if collections else None,
-            limit=limit,
-            progress=say,
-        )
+    try:
+        with Staging(STAGING_DB) as staging:
+            report = run_harvest(
+                config,
+                staging,
+                cache_dir=WEB_CACHE,
+                use_cache=not no_cache,
+                collections=list(collections) if collections else None,
+                limit=limit,
+                progress=say,
+                session=session,
+            )
+    except AuthExpired as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
     table = Table(title="Harvest", header_style="bold")
     table.add_column("Collection")
@@ -702,9 +886,19 @@ def harvest(
         for err in c.errors[:3]:
             console.print(f"  [red]![/red] [cyan]{c.name}[/cyan] {err['url']}: {err['error']}")
 
+    for c in report.collections:
+        for item in c.scrubbed.summary():
+            style = "red" if "dropped" in item else "yellow"
+            if item.startswith("personal data"):
+                style = "dim"
+            console.print(f"  [{style}]•[/{style}] [cyan]{c.name}[/cyan]: {item}")
+    for note in report.notes:
+        console.print(f"  • {note}")
+
     console.print(
         f"\n{report.requests_made:,} request(s) made, "
         f"{report.cache_hits:,} served from cache"
+        + (" [green](authenticated)[/green]" if report.authenticated else "")
     )
     md = save_text(render_harvest(report), REPORTS_DIR / "harvest.md")
     console.print(f"[dim]report: {md}[/dim]")

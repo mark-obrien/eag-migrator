@@ -27,7 +27,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .extract import ExtractError, extract_html, extract_json, flatten, links_from
 from .fetcher import DEFAULT_UA, Fetcher
+from .safety import ScrubReport, scrub
+from .session import Session
 from .staging import Staging
+
+
+class AuthExpired(RuntimeError):
+    """The session stopped being valid part-way through a harvest."""
 
 
 # --- configuration ----------------------------------------------------------
@@ -58,10 +64,21 @@ class SitemapDiscovery(BaseModel):
 
 class ApiDiscovery(BaseModel):
     url: str
+    style: Literal["page", "offset", "cursor", "single"] = "page"
+    """How the endpoint paginates. `single` = one request, no pagination."""
+    method: Literal["GET", "POST"] = "GET"
+    body: dict[str, Any] | None = None
+    """Request body for POST endpoints (GraphQL, search APIs)."""
+
     per_page: int = 100
     page_param: str = "page"
     per_page_param: str = "per_page"
-    max_pages: int = 100
+    offset_param: str = "offset"
+    cursor_param: str = "cursor"
+    cursor_path: str | None = None
+    """Where the next cursor lives in the response, e.g. 'meta.next_cursor'."""
+
+    max_pages: int = 200
     record_path: str = ""
     """Dotted path to the list inside the payload; blank if the payload is the list."""
 
@@ -116,6 +133,9 @@ class Site(BaseModel):
     base_url: str
     rate_limit_rps: float = 1.0
     respect_robots: bool = True
+    requires_auth: bool = False
+    """Set by recon when the app is behind a login. Harvest refuses without
+    a session rather than silently storing a wall of login pages."""
     user_agent: str = DEFAULT_UA
     max_pages: int = 2000
 
@@ -187,6 +207,7 @@ class CollectionResult:
     errors: list[dict[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     samples: list[dict[str, Any]] = field(default_factory=list)
+    scrubbed: ScrubReport = field(default_factory=ScrubReport)
 
 
 @dataclass
@@ -199,6 +220,8 @@ class HarvestReport:
     requests_made: int = 0
     cache_hits: int = 0
     robots_blocked: int = 0
+    authenticated: bool = False
+    notes: list[str] = field(default_factory=list)
 
     @property
     def total_stored(self) -> int:
@@ -262,32 +285,85 @@ def _crawl_urls(fetcher: Fetcher, spec: CrawlDiscovery, cap: int) -> list[str]:
 
 
 def _api_records(fetcher: Fetcher, spec: ApiDiscovery, cap: int) -> Iterator[tuple[str, Any]]:
-    """Page through a JSON endpoint, yielding (source_url, record)."""
+    """Page through a JSON endpoint, yielding (source_url, record).
+
+    Handles the four shapes an application API realistically uses: page
+    numbers, offset/limit, opaque cursors, and endpoints that just return
+    everything at once.
+    """
     from .extract import _resolve_path
 
     emitted = 0
-    for page in range(1, spec.max_pages + 1):
-        sep = "&" if "?" in spec.url else "?"
-        url = (
-            f"{spec.url}{sep}{spec.per_page_param}={spec.per_page}"
-            f"&{spec.page_param}={page}"
+    cursor: Any = None
+
+    for index in range(spec.max_pages):
+        params: list[str] = []
+        body = dict(spec.body) if spec.body else None
+
+        if spec.style == "page":
+            params = [f"{spec.per_page_param}={spec.per_page}",
+                      f"{spec.page_param}={index + 1}"]
+        elif spec.style == "offset":
+            params = [f"{spec.per_page_param}={spec.per_page}",
+                      f"{spec.offset_param}={index * spec.per_page}"]
+        elif spec.style == "cursor":
+            params = [f"{spec.per_page_param}={spec.per_page}"]
+            if cursor:
+                params.append(f"{spec.cursor_param}={cursor}")
+
+        if spec.method == "POST" and body is not None and spec.style != "single":
+            # Pagination for POST endpoints goes in the body, not the query.
+            if spec.style == "page":
+                body[spec.page_param] = index + 1
+                body[spec.per_page_param] = spec.per_page
+            elif spec.style == "offset":
+                body[spec.offset_param] = index * spec.per_page
+                body[spec.per_page_param] = spec.per_page
+            elif spec.style == "cursor" and cursor:
+                body[spec.cursor_param] = cursor
+            params = []
+
+        url = spec.url
+        if params:
+            url += ("&" if "?" in url else "?") + "&".join(params)
+
+        resp = (
+            fetcher.post_json(url, body or {})
+            if spec.method == "POST"
+            else fetcher.get(url)
         )
-        resp = fetcher.get(url)
+
+        if resp.status in (401, 403):
+            raise AuthExpired(
+                f"{resp.url} returned HTTP {resp.status}. The session is not valid "
+                f"for this endpoint — re-run `eagm login`."
+            )
         if not resp.ok or not resp.is_json:
             return
         try:
             payload = resp.json()
         except ValueError:
             return
+
         records = _resolve_path(payload, spec.record_path) if spec.record_path else payload
+        if isinstance(records, dict):
+            records = [records]
         if not isinstance(records, list) or not records:
             return
+
         for record in records:
             yield resp.url, record
             emitted += 1
             if emitted >= cap:
                 return
-        if len(records) < spec.per_page:
+
+        if spec.style == "single":
+            return
+        if spec.style == "cursor":
+            cursor = _resolve_path(payload, spec.cursor_path) if spec.cursor_path else None
+            if not cursor:
+                return
+        elif len(records) < spec.per_page:
             return
 
 
@@ -303,6 +379,7 @@ def harvest(
     collections: list[str] | None = None,
     limit: int = 0,
     progress: Any = None,
+    session: Session | None = None,
 ) -> HarvestReport:
     report = HarvestReport(
         base_url=config.site.base_url,
@@ -318,7 +395,22 @@ def harvest(
         rate_limit_rps=config.site.rate_limit_rps,
         respect_robots=config.site.respect_robots,
         use_cache=use_cache,
+        session=session,
     ) as fetcher:
+        if config.site.requires_auth and not fetcher.authenticated:
+            raise AuthExpired(
+                "this app requires a login and no session was supplied. Run "
+                "`eagm login` first, or set site.requires_auth: false if the "
+                "content really is public."
+            )
+        if fetcher.authenticated and fetcher.robots_blocks_base():
+            report.notes.append(
+                "robots.txt disallows this path. That rule is aimed at search "
+                "crawlers, not an authenticated user exporting their own records "
+                "— but it is the operator's stated preference. Proceeding because "
+                "respect_robots is off."
+            )
+
         wanted = set(collections) if collections else None
         for collection in config.active():
             if wanted and collection.name not in wanted:
@@ -331,6 +423,7 @@ def harvest(
         report.requests_made = fetcher.stats.requests
         report.cache_hits = fetcher.stats.cache_hits
         report.robots_blocked = len(fetcher.stats.blocked_by_robots)
+        report.authenticated = fetcher.authenticated
 
     report.finished_at = dt.datetime.now(dt.timezone.utc).isoformat()
     return report
@@ -367,7 +460,7 @@ def _harvest_collection(
                 if len(result.errors) < 50:
                     result.errors.append({"url": source_url, "error": str(exc)})
                 continue
-            rows.append(_finalise(extracted, collection, source_url))
+            rows.append(_finalise(extracted, collection, source_url, result.scrubbed))
             if len(result.samples) < 3:
                 result.samples.append(dict(rows[-1]))
         say(collection.name, result.fetched, result.discovered)
@@ -420,7 +513,7 @@ def _harvest_collection(
                 result.errors.append({"url": url, "error": str(exc)})
             continue
 
-        rows.append(_finalise(extracted, collection, url))
+        rows.append(_finalise(extracted, collection, url, result.scrubbed))
         if len(result.samples) < 3:
             result.samples.append(dict(rows[-1]))
         if i % 25 == 0:
@@ -434,7 +527,18 @@ def _harvest_collection(
 CANONICAL_URL_FIELDS = ("link", "permalink", "url", "guid", "canonical_url")
 
 
-def _finalise(extracted: dict[str, Any], collection: Collection, url: str) -> dict[str, Any]:
+def _finalise(
+    extracted: dict[str, Any],
+    collection: Collection,
+    url: str,
+    report: ScrubReport | None = None,
+) -> dict[str, Any]:
+    # Cardholder data is removed here, before anything is written, so no
+    # mapping or selector mistake downstream can put it on disk.
+    extracted, scrubbed = scrub(extracted)
+    if report is not None:
+        report.merge(scrubbed)
+
     row = {k: flatten(v) for k, v in extracted.items()}
 
     # `_url` should be the page this record represents, not where we happened to
@@ -473,6 +577,34 @@ def render_markdown(report: HarvestReport) -> str:
             f"| {c.name} | {c.discovered:,} | {c.fetched:,} | {c.stored:,} | {c.failed:,} |"
         )
     lines.append("")
+
+    scrubbed = [c for c in report.collections if not c.scrubbed.clean]
+    if scrubbed:
+        lines.append("## Cardholder data removed\n")
+        lines.append(
+            "Blocked at the staging layer, before anything was written. This is a "
+            "safety net, not a compliance programme.\n"
+        )
+        for c in scrubbed:
+            lines.append(f"- **{c.name}**")
+            for item in c.scrubbed.summary():
+                lines.append(f"  - {item}")
+        lines.append("")
+
+    pii = {n for c in report.collections for n in c.scrubbed.pii_fields}
+    if pii:
+        lines.append("## Personal data harvested\n")
+        lines.append(
+            "For your processing record / DPA. These fields were stored:\n"
+        )
+        lines.append("| Collection | Fields |")
+        lines.append("|---|---|")
+        for c in report.collections:
+            if c.scrubbed.pii_fields:
+                lines.append(
+                    f"| {c.name} | `" + "`, `".join(sorted(c.scrubbed.pii_fields)) + "` |"
+                )
+        lines.append("")
 
     for c in report.collections:
         if c.notes:
