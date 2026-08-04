@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block nav_rep %}on{% endblock %}
+{% block content %}
+{% if body %}
+  <div style="display:flex;align-items:baseline;gap:12px">
+    <h2 style="margin:0">{{ title }}</h2>
+    <a href="/reports{{ q }}" class="muted">← all reports</a>
+  </div>
+  <div class="card" style="margin-top:12px">{{ body | safe }}</div>
+{% else %}
+  <h2>Reports</h2>
+  {% if files %}
+    <div class="scroll">
+      <table>
+        <tr><th>Report</th><th>Kind</th><th>Modified</th><th class="num">Size</th></tr>
+        {% for f in files %}
+          <tr>
+            <td><a href="/reports/{{ f.folder }}/{{ f.name }}{{ q }}">{{ f.name }}</a></td>
+            <td class="muted">{{ f.folder }}</td>
+            <td class="muted">{{ f.modified }}</td>
+            <td class="num muted">{{ "{:,}".format(f.size) }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No reports yet. Plan, run or verify to produce some.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

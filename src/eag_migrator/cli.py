@@ -962,6 +962,51 @@ def staging(
     console.print(f"\n[dim]V2_DATABASE_URL=sqlite:///{STAGING_DB}[/dim]")
 
 
+@app.command()
+def dashboard(
+    host: str = typer.Option("127.0.0.1", help="Bind address"),
+    port: int = typer.Option(8080, help="Port"),
+    reload: bool = typer.Option(False, help="Auto-reload on code changes"),
+) -> None:
+    """Serve the web dashboard: drive and watch the whole migration in a browser.
+
+    Binds to localhost by default. This UI holds a session for a live customer
+    system and can write to v3 — set EAGM_DASHBOARD_TOKEN before exposing it
+    anywhere else.
+    """
+    import os
+
+    _settings()
+    try:
+        import uvicorn
+    except ImportError as exc:
+        console.print(
+            "[red]The dashboard needs extra packages.[/red] Rebuild the image, or "
+            "`pip install fastapi uvicorn jinja2 python-multipart markdown`."
+        )
+        raise typer.Exit(1) from exc
+
+    if host not in ("127.0.0.1", "localhost") and not os.getenv("EAGM_DASHBOARD_TOKEN"):
+        console.print(
+            f"[yellow]Binding to {host} with no token set.[/yellow] Anyone who can "
+            f"reach this port can migrate or roll back. Under docker compose that "
+            f"is fine — the port is published to 127.0.0.1 only. Anywhere else, "
+            f"set EAGM_DASHBOARD_TOKEN."
+        )
+    console.print(f"[bold]Dashboard:[/bold] http://{host}:{port}")
+    if os.getenv("EAGM_DASHBOARD_TOKEN"):
+        console.print("[dim]token required — append ?token=… to the URL[/dim]")
+
+    uvicorn.run(
+        "eag_migrator.dashboard.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="warning",
+    )
+
+
 @app.command(name="profile-summary")
 def profile_summary(side: str = typer.Argument("v2", help="v2 or v3")) -> None:
     """Print the headline facts from a stored profile."""

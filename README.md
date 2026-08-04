@@ -48,6 +48,40 @@ content — `db/*-seed/` and `state/` are gitignored for the same reason.
 
 ---
 
+## The dashboard
+
+Everything below can be driven from a browser instead:
+
+```bash
+make dashboard             # http://127.0.0.1:8080
+```
+
+One page shows connection health, the v2 session, the harvest config, the
+mapping and its unanswered TODOs, what is in staging, and every run. The
+buttons run the same code the CLI does — there is no second implementation, so
+the UI cannot drift from `eagm`.
+
+Long jobs (harvest, plan, run) stream their log live and have a **Stop**
+button. Stopping waits for the current batch to finish, so progress stays
+checkpointed and the run resumes cleanly.
+
+A few deliberate constraints:
+
+- **Localhost only.** Compose publishes the port on `127.0.0.1`. This UI holds
+  a live session for a customer system and can write to v3.
+- **Set `EAGM_DASHBOARD_TOKEN`** if you expose it anywhere else; every page and
+  action then requires it.
+- **Writing to v3 and rolling back need typing a confirmation word.** A stray
+  click or a re-POSTed form cannot start a migration.
+- **Credentials never render.** Cookie and token values are not in the HTML or
+  the JSON API, and database URLs are shown with the password stripped.
+- **One job at a time.** Two concurrent migrations would interleave writes and
+  checkpoints.
+
+The CLI remains the full interface — the dashboard covers the common path.
+
+---
+
 ## Quick start
 
 ```bash
@@ -479,6 +513,7 @@ the sink interface, so it stays reversible.
 
 | Command | Purpose |
 |---|---|
+| `eagm dashboard` | Serve the web dashboard (localhost:8080) |
 | `eagm doctor` | Check both connections and show where state and config live |
 | `eagm login <url>` | Store an authenticated session for the v2 app |
 | `eagm recon <url>` | Inspect the live v2 site; detect a login wall |
@@ -508,7 +543,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-105 tests, in four groups:
+134 tests, in five groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -528,6 +563,11 @@ make test-local    # on the host
 - **Capture** — drives real Chromium, signs in, finds the internal API, and
   checks the config it drafts actually harvests without hand-editing. Skipped
   automatically when no browser is available.
+- **The dashboard** — weighted towards what would actually hurt: that session
+  values never reach the HTML or the JSON API, that database passwords are
+  stripped, that a migration cannot start without its confirmation word, that
+  a crafted URL cannot read outside `reports/`, that the token gate holds, and
+  that a stopped run stays resumable.
 
 The database tests run on SQLite so no containers are needed, but the engine is
 dialect-agnostic — all database access goes through SQLAlchemy.
@@ -547,6 +587,7 @@ state/webcache/            cached HTTP responses (gitignored)
 state/session.json         v2 app credentials, mode 0600 (gitignored)
 db/v2-seed/, db/v3-seed/   drop .sql dumps here (gitignored)
 src/eag_migrator/
+  dashboard/               the web UI (FastAPI + server-rendered templates)
   discovery.py             schema introspection and fingerprinting
   scaffold.py              draft-mapping generator
   mapping.py               the mapping schema

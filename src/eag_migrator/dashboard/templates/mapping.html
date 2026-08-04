@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block nav_map %}on{% endblock %}
+{% block content %}
+<h2>Mapping</h2>
+{% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+{% if mapping %}
+  <p class="muted">Migration order, top to bottom. Parents before the rows that
+  reference them.</p>
+  {% for e in mapping %}
+    <div class="card" style="margin-bottom:14px">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0">{{ e.name }}</h2>
+        <span class="mono muted">{{ e.source }} → {{ e.target }}</span>
+        {% if not e.enabled %}<span class="pill warn">disabled</span>{% endif %}
+        {% if e.depends_on %}
+          <span class="pill">after {{ e.depends_on | join(', ') }}</span>
+        {% endif %}
+      </div>
+      <div class="muted" style="margin-top:4px">
+        pages on <span class="mono">{{ e.key }}</span>{% if e.map_key != e.key %},
+        lookups resolve on <span class="mono">{{ e.map_key }}</span>{% endif %}
+      </div>
+      {% if e.note %}<div class="note" style="margin-top:6px">{{ e.note }}</div>{% endif %}
+      <div class="scroll" style="margin-top:10px">
+        <table>
+          <tr><th>v3 column</th><th>from v2</th><th>transform</th><th>req</th><th>note</th></tr>
+          {% for f in e.fields %}
+            <tr>
+              <td class="mono">{{ f.to }}</td>
+              <td class="mono muted">{{ f['from'] if f['from'] is not none else '—' }}</td>
+              <td class="mono muted">{{ f.transform | join(', ') if f.transform else '—' }}</td>
+              <td>{{ '✓' if f.required else '' }}</td>
+              <td class="{{ 'note' if f.note and f.note.startswith('TODO') else 'muted' }}">
+                {{ f.note or '' }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
+  {% endfor %}
+{% elif not raw %}
+  <p class="muted">No mapping yet. Run Discover then Scaffold on the overview.</p>
+{% endif %}
+
+{% if raw %}
+  <details style="margin-top:16px">
+    <summary>config/mapping.yaml</summary>
+    <pre>{{ raw }}</pre>
+  </details>
+{% endif %}
+{% endblock %}

@@ -100,6 +100,7 @@ class Runner:
         state: RunState,
         *,
         progress: Callable[[str, int, int], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.settings = settings
         self.mapping = mapping
@@ -107,6 +108,10 @@ class Runner:
         self.sink = sink
         self.state = state
         self.progress = progress or (lambda *_: None)
+        # Checked between batches. Stopping there is clean: the batch has
+        # committed and been checkpointed, so `--resume` picks up exactly where
+        # it left off.
+        self.should_stop = should_stop or (lambda: False)
 
     # --- row building -------------------------------------------------------
 
@@ -274,6 +279,10 @@ class Runner:
                 if limit and out.processed >= limit:
                     break
             if limit and out.processed >= limit:
+                break
+            if self.should_stop():
+                out.notes.append(f"stopped on request after {out.processed:,} row(s)")
+                out.aborted = True
                 break
 
         # How many of these would collide with rows already in v3?
@@ -462,6 +471,14 @@ class Runner:
             cp.last_key = _s(last_key)
             self._checkpoint(run_id, entity, out, cp.last_key, done=False)
             self.progress(entity.name, out.processed, out.total_source_rows)
+
+            if self.should_stop():
+                out.aborted = True
+                out.notes.append(
+                    f"stopped on request after {out.processed:,} row(s); "
+                    f"resume with `eagm run --resume {run_id}`"
+                )
+                return out
 
             if self.settings.on_error == "abort" and out.failed:
                 out.aborted = True

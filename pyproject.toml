@@ -15,6 +15,9 @@ eagm = "eag_migrator.cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"eag_migrator.dashboard" = ["templates/*.html"]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 

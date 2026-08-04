@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+{% block nav_home %}on{% endblock %}
+{% block content %}
+{% set s = status %}
+
+{% if request.query_params.get('err') %}
+  <div class="flash err">{{ request.query_params.get('err') }}</div>
+{% elif request.query_params.get('msg') %}
+  <div class="flash msg">{{ request.query_params.get('msg') }}</div>
+{% endif %}
+
+<!-- Running job ---------------------------------------------------------- -->
+<div id="job-panel" class="card wide" style="{% if not s.job %}display:none{% endif %}">
+  <div style="display:flex;align-items:center;gap:12px">
+    <h2 style="margin:0">Running: <span id="job-label"></span></h2>
+    <span id="job-status" class="pill"></span>
+    <button id="job-stop" class="danger" style="margin-left:auto">Stop</button>
+  </div>
+  <p class="muted" style="margin:6px 0 10px">
+    Stopping finishes the current batch first, so progress stays checkpointed
+    and the run can be resumed.
+  </p>
+  <div class="log" id="job-log"></div>
+</div>
+
+<div class="grid">
+
+  <!-- Connections -------------------------------------------------------- -->
+  <div class="card">
+    <h2>Connections</h2>
+    {% for db in s.databases %}
+      <div class="row">
+        <span class="k">{{ db.side }}</span>
+        <span>
+          {% if not db.configured %}
+            <span class="pill warn">not configured</span>
+          {% elif db.ok %}
+            <span class="pill ok">connected</span>
+          {% else %}
+            <span class="pill bad">unreachable</span>
+          {% endif %}
+        </span>
+      </div>
+      {% if db.configured %}
+        <div class="mono muted" style="word-break:break-all">{{ db.url }}</div>
+      {% endif %}
+      {% if db.configured and not db.ok %}
+        <div class="note">{{ db.message }}</div>
+      {% endif %}
+    {% endfor %}
+    {% if s.api_sink %}
+      <div class="row"><span class="k">v3 sink</span><span>HTTP API</span></div>
+    {% endif %}
+    <p class="muted" style="margin-top:10px">Set these in <span class="mono">.env</span>.</p>
+  </div>
+
+  <!-- v2 session --------------------------------------------------------- -->
+  <div class="card">
+    <h2>v2 session</h2>
+    {% if s.session.present %}
+      <div class="row"><span class="k">origin</span><span class="mono">{{ s.session.origin }}</span></div>
+      <div class="row">
+        <span class="k">age</span>
+        <span class="{{ 'warn' if s.session.stale else 'ok' }}">{{ s.session.age_hours }}h</span>
+      </div>
+      <div class="muted" style="margin-top:6px">{{ s.session.describe }}</div>
+      {% if s.session.stale %}
+        <div class="note">Older than 12h — if calls start returning 401, sign in again.</div>
+      {% endif %}
+      <form method="post" action="/actions/logout{{ q }}" class="actions">
+        <button class="danger">Delete session</button>
+      </form>
+    {% else %}
+      <p class="muted">No session. Sign in to v2 with your own browser, then paste
+      the <span class="mono">Cookie</span> request header from devtools.</p>
+      <form method="post" action="/actions/login{{ q }}">
+        <label>v2 URL</label>
+        <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+        <label>Cookie header (or leave blank to use EAGM_COOKIE)</label>
+        <textarea name="cookies" rows="3" placeholder="sid=…; csrf=…"></textarea>
+        <div class="actions"><button class="primary">Save session</button></div>
+      </form>
+    {% endif %}
+  </div>
+
+  <!-- Read v2 over HTTP -------------------------------------------------- -->
+  <div class="card">
+    <h2>Read v2 over HTTP</h2>
+    <p class="muted">Only needed when there is no database access.</p>
+
+    <form method="post" action="/actions/recon{{ q }}">
+      <label>1 — Recon: what is this app?</label>
+      <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+      <div class="actions"><button>Recon</button></div>
+    </form>
+
+    <form method="post" action="/actions/capture{{ q }}" style="margin-top:14px">
+      <label>2 — Capture: record the API it calls (needs Chromium)</label>
+      <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+      <label>Pages to drive, one per line</label>
+      <textarea name="paths" rows="3">/customers
+/quotes
+/schedule</textarea>
+      <div class="actions"><button>Capture</button></div>
+    </form>
+
+    <form method="post" action="/actions/harvest{{ q }}" style="margin-top:14px">
+      <label>3 — Harvest into staging</label>
+      <input type="number" name="limit" value="0" min="0">
+      <div class="muted">0 = everything. Set a small number for a trial run.</div>
+      <div class="actions">
+        <button {% if not s.harvest.present %}disabled title="promote a harvest config first"{% endif %}>Harvest</button>
+      </div>
+    </form>
+
+    {% if s.harvest.draft and not s.harvest.present %}
+      <form method="post" action="/actions/promote{{ q }}" class="actions">
+        <input type="hidden" name="which" value="harvest">
+        <button class="primary">Promote harvest draft →</button>
+      </form>
+    {% endif %}
+    {% if s.harvest.present and s.harvest.valid %}
+      <h3>Collections</h3>
+      {% for c in s.harvest.collections %}
+        <div class="row"><span>{{ c.name }}</span>
+          <span class="muted">{{ c.kind }} · {{ c.fields }} fields</span></div>
+      {% endfor %}
+    {% elif s.harvest.present %}
+      <div class="note">{{ s.harvest.message }}</div>
+    {% endif %}
+  </div>
+
+  <!-- Schema + mapping --------------------------------------------------- -->
+  <div class="card">
+    <h2>Schema &amp; mapping</h2>
+    <form method="post" action="/actions/discover{{ q }}">
+      <label>Introspect</label>
+      <select name="side">
+        <option value="both">both</option><option value="v2">v2</option><option value="v3">v3</option>
+      </select>
+      <div class="actions"><button>Discover</button></div>
+    </form>
+
+    <form method="post" action="/actions/scaffold{{ q }}" class="actions">
+      <button>Scaffold mapping draft</button>
+    </form>
+
+    {% if s.mapping.present and s.mapping.valid %}
+      <div class="row"><span class="k">entities</span>
+        <span>{{ s.mapping.enabled }} of {{ s.mapping.entities }} enabled</span></div>
+      <div class="row"><span class="k">fingerprint</span>
+        <span class="mono">{{ s.mapping.fingerprint }}</span></div>
+      <div class="row"><span class="k">notes to review</span>
+        <span class="{{ 'warn' if s.mapping.open_todos else '' }}">
+          {{ s.mapping.notes }}{% if s.mapping.open_todos %} ({{ s.mapping.open_todos }} TODO){% endif %}
+        </span></div>
+      <div class="muted" style="margin-top:8px">
+        Order: {{ s.mapping.order | join(' → ') }}
+      </div>
+      <div class="actions"><a href="/mapping{{ q }}"><button type="button">Review mapping</button></a></div>
+    {% elif s.mapping.present %}
+      <div class="note">Mapping is invalid: {{ s.mapping.message }}</div>
+    {% else %}
+      <p class="muted">{{ s.mapping.message }}</p>
+    {% endif %}
+
+    {% if s.mapping.draft %}
+      <form method="post" action="/actions/promote{{ q }}" class="actions">
+        <input type="hidden" name="which" value="mapping">
+        <button class="primary">Promote mapping draft →</button>
+      </form>
+      <div class="muted">Review <span class="mono">config/mapping.draft.yaml</span> first —
+        every guess it made carries a note.</div>
+    {% endif %}
+  </div>
+
+  <!-- Migrate ------------------------------------------------------------ -->
+  <div class="card">
+    <h2>Migrate</h2>
+    {% set ready = s.mapping.present and s.mapping.valid %}
+
+    <form method="post" action="/actions/plan{{ q }}">
+      <div class="step"><span class="n">1</span>
+        <div style="flex:1">
+          <label style="margin-top:0">Dry run — transforms everything, writes nothing</label>
+          <input type="number" name="limit" value="0" min="0" placeholder="row limit">
+        </div>
+      </div>
+      <div class="actions"><button {% if not ready %}disabled{% endif %}>Plan</button></div>
+    </form>
+
+    <form method="post" action="/actions/run{{ q }}" style="margin-top:16px">
+      <div class="step"><span class="n">2</span>
+        <div style="flex:1">
+          <label style="margin-top:0">Migrate — <strong>writes to v3</strong></label>
+          <input type="text" name="confirm" placeholder="type MIGRATE to confirm" autocomplete="off">
+          <label>Resume a run id (optional)</label>
+          <input type="text" name="resume" placeholder="20260804T…">
+        </div>
+      </div>
+      <div class="actions"><button class="primary" {% if not ready %}disabled{% endif %}>Run migration</button></div>
+    </form>
+
+    <form method="post" action="/actions/verify{{ q }}" style="margin-top:16px">
+      <div class="step"><span class="n">3</span>
+        <div style="flex:1">
+          <label style="margin-top:0">Verify — counts, row diff, lookup health</label>
+          <input type="text" name="run_id" placeholder="run id (blank = latest)">
+        </div>
+      </div>
+      <div class="actions"><button {% if not ready %}disabled{% endif %}>Verify</button></div>
+    </form>
+  </div>
+
+  <!-- Staging ------------------------------------------------------------ -->
+  <div class="card">
+    <h2>Staging</h2>
+    {% if s.staging.present and s.staging.tables %}
+      {% for t in s.staging.tables %}
+        <div class="row">
+          <a href="/staging?table={{ t.name }}{% if token %}&token={{ token }}{% endif %}">{{ t.name }}</a>
+          <span class="mono">{{ "{:,}".format(t.rows) }}</span>
+        </div>
+      {% endfor %}
+      <p class="muted" style="margin-top:10px">
+        Point <span class="mono">V2_DATABASE_URL</span> at
+        <span class="mono">sqlite:////app/state/staging.sqlite</span> to migrate from this.
+      </p>
+    {% else %}
+      <p class="muted">Nothing harvested yet.</p>
+    {% endif %}
+  </div>
+
+  <!-- Runs --------------------------------------------------------------- -->
+  <div class="card wide">
+    <h2>Runs</h2>
+    {% if s.runs %}
+    <div class="scroll">
+      <table>
+        <tr><th>Run id</th><th>Mode</th><th>Status</th><th>Started</th>
+            <th class="num">Done</th><th class="num">Wrote</th><th class="num">Failed</th><th></th></tr>
+        {% for r in s.runs %}
+          <tr>
+            <td class="mono">{{ r.run_id }}</td>
+            <td>{{ r.mode }}</td>
+            <td class="{{ 'bad' if r.status == 'failed' else ('warn' if r.status == 'rolled_back' else 'ok') }}">{{ r.status }}</td>
+            <td class="muted">{{ r.started_at }}</td>
+            <td class="num">{{ r.entities_done }}/{{ r.entities }}</td>
+            <td class="num">{{ "{:,}".format(r.written) }}</td>
+            <td class="num {{ 'bad' if r.failed else '' }}">{{ "{:,}".format(r.failed) }}</td>
+            <td>
+              {% if r.mode == 'apply' and r.status != 'rolled_back' %}
+              <form method="post" action="/actions/rollback{{ q }}"
+                    style="display:flex;gap:6px">
+                <input type="hidden" name="run_id" value="{{ r.run_id }}">
+                <input type="text" name="confirm" placeholder="ROLLBACK"
+                       style="width:110px" autocomplete="off">
+                <button class="danger">Undo</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% else %}
+      <p class="muted">No runs yet.</p>
+    {% endif %}
+  </div>
+
+</div>
+
+<script>
+const TOKEN = {{ (token or "") | tojson }};
+const qs = TOKEN ? ("?token=" + encodeURIComponent(TOKEN)) : "";
+let activeJob = {{ (status.job.id if status.job else None) | tojson }};
+
+const panel = document.getElementById("job-panel");
+const logEl = document.getElementById("job-log");
+const labelEl = document.getElementById("job-label");
+const statusEl = document.getElementById("job-status");
+const stopBtn = document.getElementById("job-stop");
+
+stopBtn.addEventListener("click", async () => {
+  if (!activeJob) return;
+  stopBtn.disabled = true;
+  await fetch(`/api/jobs/${activeJob}/stop${qs}`, {method: "POST"});
+});
+
+function render(job) {
+  panel.style.display = "";
+  labelEl.textContent = job.label;
+  statusEl.textContent = job.stopping ? "stopping" : job.status;
+  statusEl.className = "pill " + ({running: "", done: "ok", failed: "bad",
+                                   stopped: "warn"}[job.status] || "");
+  const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
+  logEl.textContent = job.log.join("\n");
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  stopBtn.disabled = job.status !== "running" || job.stopping;
+}
+
+async function poll() {
+  try {
+    if (activeJob) {
+      const res = await fetch(`/api/jobs/${activeJob}${qs}`);
+      if (res.ok) {
+        const job = await res.json();
+        render(job);
+        if (job.status !== "running") {
+          activeJob = null;
+          // Let the last lines land, then refresh so every panel is current.
+          setTimeout(() => location.reload(), 1200);
+          return;
+        }
+      }
+    } else {
+      const res = await fetch(`/api/status${qs}`);
+      if (res.ok) {
+        const st = await res.json();
+        if (st.job) { activeJob = st.job.id; render(st.job); }
+      }
+    }
+  } catch (e) { /* the server may be restarting; try again next tick */ }
+  setTimeout(poll, activeJob ? 1000 : 4000);
+}
+poll();
+</script>
+{% endblock %}

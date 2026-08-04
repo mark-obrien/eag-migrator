@@ -45,6 +45,21 @@ shell: ## Shell inside the migrator container
 cli: ## Run any eagm command:  make cli CMD="plan --limit 100"
 	$(RUN) $(CMD)
 
+.PHONY: dashboard
+dashboard: setup ## Start the web dashboard on http://127.0.0.1:8080
+	$(COMPOSE) up -d dashboard
+	@echo "Dashboard: http://127.0.0.1:8080"
+	@test -n "$$EAGM_DASHBOARD_TOKEN" && \
+		echo "  token required — append ?token=$$EAGM_DASHBOARD_TOKEN" || true
+
+.PHONY: dashboard-logs
+dashboard-logs: ## Tail the dashboard logs
+	$(COMPOSE) logs -f dashboard
+
+.PHONY: dashboard-stop
+dashboard-stop: ## Stop the dashboard
+	$(COMPOSE) stop dashboard
+
 .PHONY: doctor
 doctor: ## Check both database connections
 	$(RUN) doctor

@@ -16,3 +16,9 @@ lxml>=5.2
 # `eagm capture` only. The pip package is small; the browser binary is not
 # installed unless the image is built with --build-arg WITH_BROWSER=true.
 playwright>=1.44
+# Dashboard (`eagm dashboard`). Server-rendered, no JS build step.
+fastapi>=0.111
+uvicorn>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+markdown>=3.6

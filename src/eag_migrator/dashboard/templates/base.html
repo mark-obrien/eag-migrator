@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}EAG migrator{% endblock %}</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d212a; --line: #2a2f3a;
+    --text: #e6e8ec; --dim: #9aa3b2; --accent: #6ea8fe; --ok: #4ade80;
+    --warn: #fbbf24; --bad: #f87171; --mono: ui-monospace, SFMono-Regular,
+    "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #fff; --panel2: #f0f2f5; --line: #d9dee7;
+      --text: #16191f; --dim: #5b6472; --accent: #1f5fd0;
+      --ok: #15803d; --warn: #a16207; --bad: #b91c1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 20px; padding: 14px 22px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header nav { display: flex; gap: 16px; margin-left: auto; }
+  header nav a { color: var(--dim); text-decoration: none; font-size: 14px; }
+  header nav a:hover, header nav a.on { color: var(--text); }
+  main { max-width: 1180px; margin: 0 auto; padding: 22px; }
+  h2 { font-size: 15px; margin: 0 0 12px; font-weight: 650; }
+  h3 { font-size: 13px; margin: 18px 0 8px; color: var(--dim);
+       text-transform: uppercase; letter-spacing: .6px; }
+  a { color: var(--accent); }
+  .grid { display: grid; gap: 16px; align-items: start;
+          grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px;
+  }
+  .card.wide { grid-column: 1 / -1; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
+         border-bottom: 1px solid var(--line); font-size: 14px; }
+  .row:last-child { border-bottom: 0; }
+  .row .k { color: var(--dim); }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 20px;
+          font-size: 12px; border: 1px solid var(--line); color: var(--dim); }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .pill.ok { border-color: var(--ok); } .pill.warn { border-color: var(--warn); }
+  .pill.bad { border-color: var(--bad); }
+  form { margin: 0; }
+  input[type=text], input[type=number], textarea, select {
+    width: 100%; padding: 7px 9px; border-radius: 7px; font-size: 13.5px;
+    border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+    font-family: inherit;
+  }
+  textarea { font-family: var(--mono); resize: vertical; }
+  label { display: block; font-size: 12.5px; color: var(--dim); margin: 9px 0 3px; }
+  button {
+    padding: 7px 13px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--text); cursor: pointer;
+    font-size: 13.5px; font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .4px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  pre { background: var(--panel2); padding: 12px; border-radius: 8px;
+        overflow-x: auto; font-size: 12.5px; font-family: var(--mono); }
+  .log {
+    background: #0b0d11; color: #cbd5e1; border-radius: 8px; padding: 12px;
+    font-family: var(--mono); font-size: 12px; line-height: 1.5;
+    max-height: 340px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .flash { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px;
+           border: 1px solid var(--line); font-size: 14px; }
+  .flash.err { border-color: var(--bad); color: var(--bad); }
+  .flash.msg { border-color: var(--ok); color: var(--ok); }
+  .muted { color: var(--dim); font-size: 13px; }
+  .note { color: var(--warn); font-size: 12.5px; }
+  .step { display: flex; align-items: baseline; gap: 9px; }
+  .step .n { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>EAG migrator</h1>
+  <nav>
+    <a href="/{{ q }}" class="{% block nav_home %}{% endblock %}">Overview</a>
+    <a href="/mapping{{ q }}" class="{% block nav_map %}{% endblock %}">Mapping</a>
+    <a href="/staging{{ q }}" class="{% block nav_stg %}{% endblock %}">Staging</a>
+    <a href="/reports{{ q }}" class="{% block nav_rep %}{% endblock %}">Reports</a>
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

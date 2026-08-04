@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block nav_stg %}on{% endblock %}
+{% block content %}
+<h2>Staging</h2>
+{% if not staging.present %}
+  <p class="muted">Nothing harvested yet. Use <em>Read v2 over HTTP</em> on the overview.</p>
+{% else %}
+  <p class="muted">Harvested v2 content, held as an ordinary database:
+    <span class="mono">{{ staging.path }}</span></p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin:14px 0">
+    {% for t in staging.tables %}
+      <a href="/staging?table={{ t.name }}{% if token %}&token={{ token }}{% endif %}">
+        <button type="button" class="{{ 'primary' if t.name == table else '' }}">
+          {{ t.name }} <span class="muted">{{ "{:,}".format(t.rows) }}</span>
+        </button>
+      </a>
+    {% endfor %}
+  </div>
+
+  {% if table %}
+    <h3>{{ table }} — first {{ rows | length }} row(s)</h3>
+    {% if rows %}
+      <div class="scroll">
+        <table>
+          <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
+          {% for r in rows %}
+            <tr>{% for c in columns %}
+              <td class="mono" style="max-width:320px;overflow:hidden;text-overflow:ellipsis">
+                {{ (r[c] if r[c] is not none else '') | string | truncate(160) }}</td>
+            {% endfor %}</tr>
+          {% endfor %}
+        </table>
+      </div>
+    {% else %}
+      <p class="muted">Empty.</p>
+    {% endif %}
+  {% endif %}
+{% endif %}
+{% endblock %}

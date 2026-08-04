@@ -43,6 +43,32 @@ services:
     entrypoint: ["sleep", "infinity"]
     depends_on: []
 
+  # --- The dashboard -------------------------------------------------------
+  dashboard:
+    build:
+      context: .
+      args:
+        WITH_BROWSER: "${WITH_BROWSER:-false}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      EAGM_DASHBOARD_TOKEN: "${EAGM_DASHBOARD_TOKEN:-}"
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./profiles:/app/profiles
+      - ./reports:/app/reports
+      - ./state:/app/state
+      - ./db:/app/db:ro
+    working_dir: /app
+    shm_size: 1gb
+    # Published on the loopback interface only. This UI holds a session for a
+    # live customer system and can write to v3 — it is not for a network.
+    ports:
+      - "127.0.0.1:8080:8080"
+    entrypoint: ["eagm", "dashboard", "--host", "0.0.0.0", "--port", "8080"]
+
   # --- EAG v2 candidates ---------------------------------------------------
   v2-mysql:
     profiles: ["v2-mysql"]
