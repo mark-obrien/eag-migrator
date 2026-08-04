@@ -14,6 +14,7 @@ from eag_migrator.web.safety import looks_like_pan, luhn_ok, scrub
 from eag_migrator.web.session import Session
 from eag_migrator.web.staging import Staging
 
+import fixture_app
 from fixture_app import CSRF_HEADER, CSRF_VALUE, FixtureApp
 
 
@@ -264,6 +265,120 @@ def test_nested_objects_are_stored_as_json(app, session, tmp_path):
 
     assert _json.loads(rows[9001]["customer"])["name"] == "Dana Reyes"
     assert rows[9001]["customer_id"] == 5001   # the dotted path pulls it out flat
+
+
+# --- server-rendered lists (no API at all) -----------------------------------
+
+
+def _list_config(app, **crawl) -> HarvestConfig:
+    spec = {"start": "/legacy/customers", "follow": r"/legacy/customers($|\?)",
+            "max_depth": 4, "limit": 20}
+    spec.update(crawl)
+    return HarvestConfig.model_validate(
+        {
+            "site": {"base_url": app.url, "rate_limit_rps": 0, "respect_robots": False},
+            "collections": [
+                {
+                    "name": "customers",
+                    "key": "id",
+                    "discover": {"crawl": spec},
+                    "extract": {
+                        "rows": "table.listing tbody tr.customer",
+                        "fields": [
+                            {"to": "id", "selector": ".", "attr": "data-id"},
+                            {"to": "name", "selector": "td.name"},
+                            {"to": "email", "selector": "td.email"},
+                            {"to": "phone", "selector": "td.phone"},
+                            {"to": "detail_url", "selector": "td.name a", "attr": "href"},
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+
+def test_a_list_screen_yields_one_record_per_row(app, session, tmp_path):
+    """Without row scoping this returns one record per page, not per customer."""
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(_list_config(app), staging, cache_dir=tmp_path / "c",
+                         session=session)
+        rows = {r["id"]: r for r in staging.sample("customers", 50)}
+
+    assert report.total_stored == 5           # 5 rows across 3 paginated pages
+    assert set(rows) == {"5001", "5002", "5003", "5004", "5005"}
+    # Each row is read relative to itself — otherwise every record on a page
+    # carries the first row's values.
+    assert rows["5002"]["name"] == "Sam Oyelaran"
+    assert rows["5002"]["email"] == "sam.oyelaran@example.com"
+    assert rows["5005"]["detail_url"] == f"{app.url}/legacy/customers/5005"
+
+
+def test_rows_sharing_a_page_get_distinct_keys(app, session, tmp_path):
+    with Staging(tmp_path / "s.sqlite") as staging:
+        harvest(_list_config(app), staging, cache_dir=tmp_path / "c", session=session)
+        rows = staging.sample("customers", 50)
+
+    assert len({r["_key"] for r in rows}) == 5
+
+
+def test_a_list_screen_drafts_its_own_selectors(app, auth_fetcher):
+    """Nobody should have to hand-write a selector per column per screen."""
+    from eag_migrator.web.listing import propose
+
+    resp = auth_fetcher.get(f"{app.url}/legacy/customers")
+    found = propose(resp.text, resp.url)
+
+    assert found is not None
+    assert found.kind == "table"
+    assert found.row_count == 2
+    assert found.key == "id"                       # read off <tr data-id="...">
+
+    # Scoped to the table, so a second table on the page is not read into it.
+    assert found.rows == "table.listing tr.customer"
+
+    by_name = {f.to: f for f in found.fields}
+    assert by_name["id"].selector == "."           # the row element itself
+    assert by_name["id"].attr == "data-id"
+    assert by_name["name"].selector == "td:nth-of-type(1)"
+    assert by_name["email"].selector == "td:nth-of-type(2)"
+    assert by_name["name_url"].attr == "href"      # the link to the record
+    # The last column holds nothing but a Delete button. Not a field.
+    assert set(by_name) == {"id", "name", "name_url", "email", "phone", "zip"}
+
+    assert found.next_url == f"{app.url}/legacy/customers?page=2"
+
+
+def test_a_drafted_config_actually_harvests(app, auth_fetcher, session, tmp_path):
+    """The draft is worth having only if it runs without being rewritten."""
+    from eag_migrator.web.draft import draft_from_pages
+
+    resp = auth_fetcher.get(f"{app.url}/legacy/customers")
+    config, _warnings = draft_from_pages([(resp.url, resp.text)], app.url)
+    config.site.rate_limit_rps = 0
+
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(config, staging, cache_dir=tmp_path / "c", session=session)
+        rows = staging.sample("customers", 50)
+
+    assert report.total_stored == 5
+    assert {r["name"] for r in rows} == {
+        "Dana Reyes", "Sam Oyelaran", "Kit Nakamura", "Robin Vale", "Ash Whitfield",
+    }
+
+
+def test_the_crawler_never_follows_a_destructive_link(app, session, tmp_path):
+    """The nav and every row carry delete/logout links. Signed in, on a live
+    payments system, following one is not a crawl — it is an incident."""
+    fixture_app.TOUCHED.clear()
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(_list_config(app), staging, cache_dir=tmp_path / "c",
+                         session=session)
+
+    assert fixture_app.TOUCHED == []
+    notes = " ".join(n for c in report.collections for n in c.notes)
+    assert "not followed" in notes
+    assert "/logout" in notes or "delete" in notes
 
 
 # --- cardholder data --------------------------------------------------------

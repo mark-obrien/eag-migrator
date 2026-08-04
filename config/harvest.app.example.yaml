@@ -158,6 +158,38 @@ collections:
         - to: paid_at
           path: paid_at
 
+  # --- a server-rendered list screen: no JSON anywhere ---------------------
+  # For an older v2 that renders on the server. `rows:` is the whole trick:
+  # without it the selectors are read against the page and fifty customers
+  # come back as one record. `eagm draft-html <url>` writes this section for
+  # you by looking at the real markup.
+  - name: legacy_customers
+    key: id
+    discover:
+      crawl:
+        start: /customers
+        # Anchored to the list path so the crawl walks pagination
+        # (/customers?page=2) and never wanders into /customers/5001.
+        follow: '/customers/?($|\?)'
+        max_depth: 6
+        limit: 500
+    extract:
+      type: html
+      rows: "table.listing tbody tr"      # the repeated element
+      fields:
+        - to: id
+          selector: "."                   # "." is the row itself, not a child
+          attr: data-id
+        - to: name
+          selector: "td:nth-of-type(1)"
+        - to: email
+          selector: "td:nth-of-type(2)"
+        - to: phone
+          selector: "td:nth-of-type(3)"
+        - to: detail_url                  # the link through to the record
+          selector: "td:nth-of-type(1) a"
+          attr: href
+
 # After harvesting:
 #
 #   export V2_DATABASE_URL=sqlite:////app/state/staging.sqlite

@@ -88,6 +88,11 @@ capture: ## Record the site's network calls (needs the browser in the image)
 	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
 	$(RUN) capture $(URL)
 
+.PHONY: draft-html
+draft-html: ## Draft selectors from a server-rendered list screen:  make draft-html URL=https://…/customers
+	@test -n "$(URL)" || (echo "Set URL=https://…" && exit 1)
+	$(RUN) draft-html $(URL)
+
 .PHONY: build-browser
 build-browser: setup ## Rebuild with Chromium and restart the dashboard
 	WITH_BROWSER=true $(COMPOSE) build

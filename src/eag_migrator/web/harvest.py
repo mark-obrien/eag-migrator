@@ -26,7 +26,14 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config import expand_env
-from .extract import ExtractError, extract_html, extract_json, flatten, links_from
+from .extract import (
+    ExtractError,
+    extract_html,
+    extract_json,
+    flatten,
+    links_from,
+    select_rows,
+)
 from .fetcher import DEFAULT_UA, Fetcher
 from .safety import ScrubReport, scrub
 from .session import Session
@@ -117,6 +124,13 @@ class Discovery(BaseModel):
 
 class Extract(BaseModel):
     type: Literal["html", "json"] = "html"
+    rows: str | None = None
+    """CSS selector for the element a list screen repeats — a table row, a card.
+
+    Without it a page yields one record, which is right for a detail page and
+    useless for a list of 50 customers. With it, field selectors are read
+    relative to each matching element.
+    """
     fields: list[FieldSpec]
 
 
@@ -260,13 +274,18 @@ def _sitemap_urls(fetcher: Fetcher, limit: int) -> list[str]:
     return urls
 
 
-def _crawl_urls(fetcher: Fetcher, spec: CrawlDiscovery, cap: int) -> list[str]:
+def _crawl_urls(
+    fetcher: Fetcher, spec: CrawlDiscovery, cap: int, refused: dict[str, str] | None = None
+) -> list[str]:
     start = urljoin(fetcher.base_url + "/", spec.start.lstrip("/"))
     keep = re.compile(spec.keep or spec.follow) if (spec.keep or spec.follow) else None
 
     seen: set[str] = set()
     kept: list[str] = []
     queue: list[tuple[str, int]] = [(start, 0)]
+    # A crawl runs signed in. Delete, refund, send and logout links are
+    # recorded and left alone rather than followed.
+    skipped: dict[str, str] = {}
 
     while queue and len(kept) < min(spec.limit, cap):
         url, depth = queue.pop(0)
@@ -280,9 +299,15 @@ def _crawl_urls(fetcher: Fetcher, spec: CrawlDiscovery, cap: int) -> list[str]:
         if keep is None or keep.search(url):
             kept.append(url)
         if depth < spec.max_depth:
-            for link in links_from(resp.text, url, spec.follow):
+            links, refused_here = links_from(resp.text, url, spec.follow)
+            for link, why in refused_here:
+                if link not in skipped:
+                    skipped[link] = why
+            for link in links:
                 if urlparse(link).netloc == urlparse(fetcher.origin).netloc and link not in seen:
                     queue.append((link, depth + 1))
+    if refused is not None:
+        refused.update(skipped)
     return kept
 
 
@@ -497,7 +522,13 @@ def _harvest_collection(
                 f"pattern against the URL shapes in the recon report"
             )
     elif disc.crawl:
-        urls = _crawl_urls(fetcher, disc.crawl, cap)
+        refused: dict[str, str] = {}
+        urls = _crawl_urls(fetcher, disc.crawl, cap, refused)
+        if refused:
+            result.notes.append(
+                f"{len(refused)} link(s) not followed (state changes, logout): "
+                + ", ".join(list(refused)[:5])
+            )
     else:
         urls = [
             urljoin(fetcher.base_url + "/", u.lstrip("/")) if not u.startswith("http") else u
@@ -521,20 +552,40 @@ def _harvest_collection(
 
         try:
             if collection.extract.type == "json":
-                extracted = extract_json(resp.json(), collection.extract.fields, url=url)
+                found = [extract_json(resp.json(), collection.extract.fields, url=url)]
+            elif collection.extract.rows:
+                soup = BeautifulSoup(resp.text, "lxml")
+                elements = select_rows(resp.text, collection.extract.rows, soup)
+                if not elements and len(result.notes) < 5:
+                    result.notes.append(
+                        f"rows selector {collection.extract.rows!r} matched nothing on "
+                        f"{url} — check it against the real markup"
+                    )
+                found = [
+                    extract_html(
+                        resp.text, url, collection.extract.fields, soup=soup, node=element
+                    )
+                    for element in elements
+                ]
             else:
-                extracted = extract_html(
-                    resp.text, url, collection.extract.fields, soup=BeautifulSoup(resp.text, "lxml")
-                )
+                found = [
+                    extract_html(
+                        resp.text, url, collection.extract.fields,
+                        soup=BeautifulSoup(resp.text, "lxml"),
+                    )
+                ]
         except (ExtractError, ValueError) as exc:
             result.failed += 1
             if len(result.errors) < 50:
                 result.errors.append({"url": url, "error": str(exc)})
             continue
 
-        rows.append(_finalise(extracted, collection, url, result.scrubbed))
-        if len(result.samples) < 3:
-            result.samples.append(dict(rows[-1]))
+        for position, extracted in enumerate(found):
+            rows.append(
+                _finalise(extracted, collection, url, result.scrubbed, position)
+            )
+            if len(result.samples) < 3:
+                result.samples.append(dict(rows[-1]))
 
     say(collection.name, result.fetched, result.discovered)
     result.stored = staging.insert(collection.name, columns, rows)
@@ -549,6 +600,7 @@ def _finalise(
     collection: Collection,
     url: str,
     report: ScrubReport | None = None,
+    position: int = 0,
 ) -> dict[str, Any]:
     # Cardholder data is removed here, before anything is written, so no
     # mapping or selector mistake downstream can put it on disk.
@@ -570,7 +622,14 @@ def _finalise(
 
     key = row.get(collection.key) if collection.key else None
     row["_url"] = canonical
-    row["_key"] = str(key) if key not in (None, "") else canonical
+    # Many rows can share a URL, so the position disambiguates them. It is a
+    # weak key — re-harvest after the list reorders and rows shuffle — so a
+    # real `key:` field matters far more for row-wise collections.
+    row["_key"] = (
+        str(key)
+        if key not in (None, "")
+        else (f"{canonical}#{position}" if position or collection.extract.rows else canonical)
+    )
     row["_fetched_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
     return row
 

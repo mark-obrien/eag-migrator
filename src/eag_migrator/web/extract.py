@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -19,6 +19,10 @@ from ..transforms import TransformError
 
 class ExtractError(ValueError):
     """A selector or path did not resolve and the field was marked required."""
+
+
+#: Selectors meaning "the row element itself" rather than something inside it.
+SELF_SELECTORS = (".", ":scope", "&", "self")
 
 
 def _resolve_path(record: Any, path: str) -> Any:
@@ -63,8 +67,16 @@ def extract_html(
     fields: list[Any],
     *,
     soup: BeautifulSoup | None = None,
+    node: Any = None,
 ) -> dict[str, Any]:
+    """Pull fields out of a page, or out of one row within it.
+
+    `node` scopes the selectors — a list screen holds many records, and each
+    row's cells have to be read relative to that row rather than to the page,
+    or every record comes back identical to the first.
+    """
     doc = soup or BeautifulSoup(html, "lxml")
+    scope = node if node is not None else doc
     out: dict[str, Any] = {}
 
     for field in fields:
@@ -75,6 +87,7 @@ def extract_html(
             out[field.to] = field.const
             continue
         if field.source == "jsonld":
+            # JSON-LD belongs to the page, never to a row inside it.
             out[field.to] = _from_jsonld(doc, field.path or "")
             continue
 
@@ -82,10 +95,18 @@ def extract_html(
             out[field.to] = None
             continue
 
-        try:
-            nodes = doc.select(field.selector)
-        except Exception as exc:  # noqa: BLE001 - bad CSS is a config error
-            raise ExtractError(f"{field.to}: invalid selector {field.selector!r}: {exc}") from exc
+        if field.selector in SELF_SELECTORS and node is not None:
+            # The row element itself. `<tr data-id="5001">` is how list screens
+            # usually carry the record id, and `select()` only ever looks at
+            # descendants — soupsieve does not honour `:scope` there.
+            nodes = [node]
+        else:
+            try:
+                nodes = scope.select(field.selector)
+            except Exception as exc:  # noqa: BLE001 - bad CSS is a config error
+                raise ExtractError(
+                    f"{field.to}: invalid selector {field.selector!r}: {exc}"
+                ) from exc
 
         if not nodes:
             if field.required:
@@ -171,17 +192,54 @@ def _from_jsonld(doc: BeautifulSoup, path: str) -> Any:
     return None
 
 
-def links_from(html: str, url: str, pattern: str | None = None) -> list[str]:
-    """Same-page links, optionally filtered by a regex on the path."""
+def select_rows(html: str, selector: str, soup: BeautifulSoup | None = None) -> list[Any]:
+    """The elements a list screen repeats — table rows, cards, list items."""
+    doc = soup or BeautifulSoup(html, "lxml")
+    try:
+        return list(doc.select(selector))
+    except Exception as exc:  # noqa: BLE001 - bad CSS is a config error
+        raise ExtractError(f"invalid rows selector {selector!r}: {exc}") from exc
+
+
+def links_from(
+    html: str, url: str, pattern: str | None = None
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Same-page links, split into safe-to-follow and must-not-touch.
+
+    Returns (safe, [(url, reason), ...]). A crawl runs signed in to a live
+    system, so following a delete or logout link is not a crawl, it is an
+    incident.
+    """
+    from .capture import UNSAFE_LINK
+
     doc = BeautifulSoup(html, "lxml")
     regex = re.compile(pattern) if pattern else None
-    out: list[str] = []
+    safe: list[str] = []
+    skipped: list[tuple[str, str]] = []
+
     for tag in doc.find_all("a", href=True):
-        href = urljoin(url, tag["href"]).split("#")[0]
+        raw = tag["href"]
+        if raw.lower().startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        href = urljoin(url, raw).split("#")[0]
+
+        method = (tag.get("data-method") or "").lower()
+        if method and method != "get":
+            skipped.append((href, f"data-method={method}"))
+            continue
+        if tag.get("data-confirm") or tag.get("data-turbo-confirm"):
+            skipped.append((href, "has a confirmation prompt"))
+            continue
+
+        parsed = urlparse(href)
+        if UNSAFE_LINK.search(parsed.path + "?" + (parsed.query or "")):
+            skipped.append((href, "looks like a state change"))
+            continue
         if regex and not regex.search(href):
             continue
-        out.append(href)
-    return list(dict.fromkeys(out))
+        safe.append(href)
+
+    return list(dict.fromkeys(safe)), skipped
 
 
 def flatten(value: Any) -> Any:

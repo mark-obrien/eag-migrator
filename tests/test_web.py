@@ -227,9 +227,40 @@ def test_extract_json_resolves_dotted_paths():
 
 def test_links_are_resolved_and_filtered(fetcher, site):
     resp = fetcher.get(site.url)
-    links = links_from(resp.text, resp.url, r"/services/")
+    links, _skipped = links_from(resp.text, resp.url, r"/services/")
     assert len(links) == 3
     assert all(link.startswith(f"{site.url}/services/") for link in links)
+
+
+def test_destructive_links_are_never_followed():
+    html = """
+      <a href="/customers">Customers</a>
+      <a href="/customers/4/edit">Edit</a>
+      <a href="/logout">Sign out</a>
+      <a href="/quotes/9/delete">Delete</a>
+      <a href="/invoices/3/refund">Refund</a>
+      <a href="/invoices/3" data-method="delete">Remove</a>
+      <a href="/jobs/7/close" data-confirm="Are you sure?">Close</a>
+      <a href="mailto:ops@example.test">Email</a>
+      <a href="javascript:void(0)">Menu</a>
+    """
+    links, skipped = links_from(html, "https://app.example.test/dash")
+
+    # mailto:/javascript: are not links to anywhere, so they are simply dropped.
+    assert links == [
+        "https://app.example.test/customers",
+        "https://app.example.test/customers/4/edit",
+    ]
+    refused = dict(skipped)
+    assert set(refused) == {
+        "https://app.example.test/logout",
+        "https://app.example.test/quotes/9/delete",
+        "https://app.example.test/invoices/3/refund",
+        "https://app.example.test/invoices/3",
+        "https://app.example.test/jobs/7/close",
+    }
+    assert refused["https://app.example.test/invoices/3"] == "data-method=delete"
+    assert refused["https://app.example.test/jobs/7/close"] == "has a confirmation prompt"
 
 
 # --- harvest ----------------------------------------------------------------

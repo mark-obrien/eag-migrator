@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from .harvest import (
     ApiDiscovery,
     Collection,
+    CrawlDiscovery,
     Discovery,
     Extract,
     FieldSpec,
@@ -23,6 +24,7 @@ from .harvest import (
     SitemapDiscovery,
     Site,
 )
+from .listing import propose
 from .recon import SiteProfile
 
 # WordPress REST fields worth taking by default.
@@ -233,6 +235,81 @@ def draft_from_capture(report: Any, base_url: str) -> tuple[HarvestConfig, list[
             "No list endpoints were captured. Drive more of the app with repeated "
             "--path options (the customers list, the quotes list, the schedule) so "
             "there is something to record."
+        )
+
+    parsed = urlparse(base_url)
+    config = HarvestConfig(
+        version=1,
+        site=Site(
+            base_url=f"{parsed.scheme}://{parsed.netloc}",
+            rate_limit_rps=1.0,
+            respect_robots=False,
+            requires_auth=True,
+            max_pages=5000,
+        ),
+        collections=collections,
+    )
+    return config, warnings
+
+
+def draft_from_pages(
+    pages: list[tuple[str, str]], base_url: str
+) -> tuple[HarvestConfig, list[str]]:
+    """Build a harvest config from the markup of list screens.
+
+    The path for a v2 that renders on the server: no JSON to read, so each
+    screen's repeated element becomes a collection and each column a field.
+
+    `pages` is [(url, html), ...] — one per screen worth harvesting.
+    """
+    warnings: list[str] = []
+    collections: list[Collection] = []
+    seen: set[str] = set()
+
+    for url, html in pages:
+        found = propose(html, url)
+        if not found:
+            warnings.append(
+                f"{url}: no repeated structure found — either it is a detail page "
+                f"(one record) or the list is rendered by JavaScript, in which case "
+                f"`eagm capture` will find the endpoint behind it."
+            )
+            continue
+
+        name = _collection_name(url)
+        base, i = name, 2
+        while name in seen:
+            name = f"{base}_{i}"
+            i += 1
+        seen.add(name)
+
+        parsed = urlparse(url)
+        start = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        collections.append(
+            Collection(
+                name=name,
+                key=found.key,
+                discover=Discovery(
+                    crawl=CrawlDiscovery(start=start, follow=found.follow, max_depth=6)
+                ),
+                extract=Extract(type="html", rows=found.rows, fields=found.fields),
+                note=(
+                    f"TODO: read off a {found.kind} of {found.row_count} row(s) on "
+                    f"{url}. Check every selector against the page before a full run."
+                ),
+            )
+        )
+        warnings.extend(f"{name}: {n}" for n in found.notes)
+        if not found.key:
+            warnings.append(
+                f"{name}: no id on the rows, so `key:` is unset — re-harvesting will "
+                f"key on page position, which shifts when the list reorders."
+            )
+
+    if not collections:
+        warnings.append(
+            "Nothing to harvest from these pages. Check they are list screens and "
+            "that the session is still signed in — a login page has no records on it."
         )
 
     parsed = urlparse(base_url)

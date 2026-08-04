@@ -33,6 +33,7 @@ def workspace(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(dash, "STATE_DB", state / "migration.sqlite")
     monkeypatch.setattr(dash, "STAGING_DB", state / "staging.sqlite")
     monkeypatch.setattr(dash, "SESSION_FILE", state / "session.json")
+    monkeypatch.setattr(dash, "WEB_CACHE", state / "webcache")
     monkeypatch.setattr(dash, "MAPPING_FILE", tmp_path / "config" / "mapping.yaml")
     monkeypatch.setattr(dash, "MAPPING_DRAFT", tmp_path / "config" / "mapping.draft.yaml")
     monkeypatch.setattr(dash, "HARVEST_FILE", tmp_path / "config" / "harvest.yaml")
@@ -459,6 +460,37 @@ def test_a_failed_sign_in_is_reported_without_the_password(workspace, monkeypatc
     assert "credentials rejected" in job.error
     assert "wrong-password" not in "\n".join(job.log)
     assert not dash.SESSION_FILE.exists()
+
+
+def test_draft_html_reads_a_list_screen_and_writes_a_config(workspace, monkeypatch):
+    """The no-API path has to be reachable from the dashboard, not just the CLI."""
+    import eag_migrator.dashboard.app as dashmod
+    from eag_migrator.web.session import Session
+
+    from fixture_app import FixtureApp
+
+    with FixtureApp() as app:
+        Session.from_cookie_header(app.cookie_header, app.url).save(dash.SESSION_FILE)
+        client = TestClient(dashmod.create_app())
+
+        res = client.post(
+            "/actions/draft-html",
+            data={"url": f"{app.url}/legacy/customers", "paths": ""},
+            follow_redirects=False,
+        )
+        assert res.status_code == 303
+        job = dashmod.jobs.recent(1)[0]
+        _wait(job)
+
+    assert job.status == "done", job.error
+    assert job.result["collections"] == 1
+
+    drafted = dash.HARVEST_DRAFT.read_text()
+    assert "rows: table.listing tr.customer" in drafted
+    assert "data-id" in drafted
+    # The session cookie is not a thing to write into a config file or a log.
+    assert "s3ss10n" not in drafted
+    assert "s3ss10n" not in "\n".join(job.log)
 
 
 def test_form_login_accepts_credentials_directly_or_from_env(monkeypatch):

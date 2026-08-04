@@ -828,9 +828,63 @@ def create_app() -> FastAPI:
                 job.say(f"drafted {len(config.collections)} collection(s) -> {HARVEST_DRAFT}")
                 for warning in warnings[:20]:
                     job.say(f"  ! {warning}")
+            elif report.pages_visited:
+                # Nothing to capture because the app renders on the server —
+                # so the records are in the markup, not behind an endpoint.
+                job.say("no JSON endpoints; reading the HTML of those pages instead")
+                _draft_html(job, url, report.pages_visited, session)
             return {"endpoints": len(report.api_calls)}
 
         return _launch(request, "capture", "Capture network calls", work)
+
+    def _draft_html(job: Any, base_url: str, urls: list[str], session: Any) -> int:
+        """Turn the repeated markup on each list screen into a harvest config."""
+        from ..web.draft import draft_from_pages
+        from ..web.fetcher import Fetcher
+        from ..web.harvest import dump_config
+
+        pages: list[tuple[str, str]] = []
+        with Fetcher(base_url, cache_dir=WEB_CACHE, respect_robots=False,
+                     session=session) as fetcher:
+            for one in urls:
+                resp = fetcher.get(one)
+                if resp.ok and "html" in (resp.content_type or "html"):
+                    pages.append((resp.url, resp.text))
+                else:
+                    job.say(f"  · {_safe_url(one)}: HTTP {resp.status}, skipped")
+
+        config, warnings = draft_from_pages(pages, base_url)
+        dump_config(config, HARVEST_DRAFT)
+        for collection in config.collections:
+            job.say(
+                f"  {collection.name}: {collection.extract.rows} "
+                f"({len(collection.extract.fields)} field(s), "
+                f"key={collection.key or 'none'})"
+            )
+        job.say(f"drafted {len(config.collections)} collection(s) -> {HARVEST_DRAFT}")
+        for warning in warnings[:20]:
+            job.say(f"  ! {warning}")
+        return len(config.collections)
+
+    @app.post("/actions/draft-html", dependencies=[Depends(require_token)])
+    def action_draft_html(
+        request: Request, url: str = Form(...), paths: str = Form("")
+    ) -> Any:
+        def work(job: Any) -> dict[str, Any]:
+            from ..web.session import Session
+
+            session = Session.load(SESSION_FILE) if SESSION_FILE.exists() else None
+            extra = [p.strip() for p in paths.replace(",", "\n").splitlines() if p.strip()]
+            job.say(
+                f"reading {1 + len(extra)} screen(s)"
+                f"{' (authenticated)' if session else ' anonymously'}"
+            )
+            drafted = _draft_html(job, url, [url, *extra], session)
+            if not drafted:
+                job.say("nothing repeated found — are those list screens?")
+            return {"collections": drafted}
+
+        return _launch(request, "draft-html", "Draft from HTML", work)
 
     @app.post("/actions/harvest", dependencies=[Depends(require_token)])
     def action_harvest(request: Request, limit: int = Form(0)) -> Any:

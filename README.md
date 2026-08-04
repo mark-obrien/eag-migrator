@@ -259,6 +259,47 @@ the app words its destructive actions unusually, drive it with explicit
 `config/harvest.app.example.yaml` is a worked example covering all four
 pagination styles (page, offset, cursor, POST body).
 
+#### If there is no JSON at all
+
+Older installs render on the server: the customers screen is a `<table>`, and
+that table *is* the data. `capture` will find nothing, because there is nothing
+to find — so it falls back to reading the markup, and you can also do that
+directly without a browser:
+
+```bash
+make cli CMD="draft-html https://app.example.com/customers \
+     --also /quotes --also /invoices"
+```
+
+For each screen it works out the repeated element, one field per column (named
+from the table headers), the id the rows carry in `data-id`, and the link to
+the next page — then writes them into `config/harvest.draft.yaml` as an
+ordinary crawl collection. Review it, correct what it guessed, and harvest.
+
+The part that matters in the config is `rows:`:
+
+```yaml
+extract:
+  rows: "table.listing tbody tr"     # the repeated element — one record each
+  fields:
+    - to: id
+      selector: "."                  # "." means the row itself, not a child
+      attr: data-id
+    - to: name
+      selector: "td:nth-of-type(1)"
+    - to: detail_url
+      selector: "td.name a"
+      attr: href
+```
+
+Without `rows:`, selectors are read against the whole page and a list of fifty
+customers gives you **one** record. With it, each row is read relative to
+itself. It applies to any repeated block — table rows, cards, list items.
+
+The crawler that walks the pagination has the same refusals as `--explore`: no
+"Delete", no "Refund", no "Log out", nothing carrying `data-method` or a
+confirmation prompt. Each refusal is reported on the collection.
+
 #### Authentication
 
 Three ways, in order of preference:
@@ -611,6 +652,7 @@ the sink interface, so it stays reversible.
 | `eagm login <url>` | Store an authenticated session for the v2 app |
 | `eagm recon <url>` | Inspect the live v2 site; detect a login wall |
 | `eagm capture <url>` | Record the app's own API calls and draft a harvest config |
+| `eagm draft-html <url>` | Read a server-rendered list screen and draft its selectors |
 | `eagm harvest` | Pull the site into `state/staging.sqlite` |
 | `eagm staging` | Show what is in the staging database |
 | `eagm discover --side both` | Introspect and profile the databases |
@@ -639,7 +681,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-157 tests, in five groups:
+164 tests, in five groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -655,7 +697,11 @@ make test-local    # on the host
   that renders nothing until its XHRs land, and all four pagination styles.
   Covers the login wall (anonymous requests get no data), expired sessions
   failing loudly, and the cardholder-data guard — including asserting that no
-  PAN appears anywhere in the staging file's bytes.
+  PAN appears anywhere in the staging file's bytes. Also covers the
+  server-rendered half: a paginated table of customers that has to yield one
+  record per row rather than one per page, a draft read straight off that
+  markup that harvests without being hand-edited, and a crawl that walks the
+  pagination while touching none of the per-row Delete links.
 - **Capture** — drives real Chromium, signs in, finds the internal API, and
   checks the config it drafts actually harvests without hand-editing. Includes
   an explore pass over a fixture app whose navigation contains Delete, Refund,
@@ -706,6 +752,7 @@ src/eag_migrator/
     recon.py               platform fingerprinting, login-wall and API discovery
     capture.py             browser-driven network capture
     draft.py               draft-harvest-config generator
+    listing.py             reads a list screen's markup into row selectors
     extract.py             CSS / JSON-path / JSON-LD extraction
     harvest.py             crawl and pull into staging
     staging.py             the staging database

@@ -77,6 +77,7 @@ switch ($Task) {
         Write-Host "    recon <url>      what is this app? is it behind a login?"
         Write-Host "    login <url>      store a session (set EAGM_COOKIE in .env first)"
         Write-Host "    capture <url>    record the API it calls"
+        Write-Host "    draft-html <url> read a list screen's HTML into selectors"
         Write-Host "    harvest          pull it into state/staging.sqlite"
         Write-Host "    staging          show what was harvested"
         Write-Host ""
@@ -121,7 +122,8 @@ switch ($Task) {
     "dashboard-stop" { Invoke-Compose @("stop", "dashboard") }
 
     "recon"   { Require-Argument "a URL"; Invoke-Eagm (@("recon") + $Rest) }
-    "capture" { Require-Argument "a URL"; Invoke-Eagm (@("capture") + $Rest) }
+    "capture"    { Require-Argument "a URL"; Invoke-Eagm (@("capture") + $Rest) }
+    "draft-html" { Require-Argument "a URL"; Invoke-Eagm (@("draft-html") + $Rest) }
     "login" {
         Require-Argument "a URL"
         Invoke-Compose (@("run", "--rm", "-e", "EAGM_COOKIE", "-e", "EAGM_AUTH_TOKEN",

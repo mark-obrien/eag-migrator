@@ -156,6 +156,19 @@
       </div>
     </form>
 
+    <form method="post" action="/actions/draft-html{{ q }}" style="margin-top:14px">
+      <label>2b — Or read the HTML, if there is no API</label>
+      <input type="text" name="url"
+             placeholder="https://shop.everythingautoglass.com/customers" required>
+      <label>More list screens, one per line</label>
+      <textarea name="paths" rows="2" placeholder="/quotes
+/invoices"></textarea>
+      <div class="muted">For a v2 that renders on the server. Works out the
+        repeated row, a field per column, the row id and the next-page link.
+        No browser needed.</div>
+      <div class="actions"><button>Draft from HTML</button></div>
+    </form>
+
     <form method="post" action="/actions/harvest{{ q }}" style="margin-top:14px">
       <label>3 — Harvest into staging</label>
       <input type="number" name="limit" value="0" min="0">

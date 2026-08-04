@@ -857,6 +857,92 @@ def capture(
             f"\nReview it, then: [bold]mv {path_out} {HARVEST_CONFIG}[/bold] "
             f"and run [bold]eagm harvest[/bold]"
         )
+    elif draft and report.pages_visited:
+        # No JSON anywhere: the app renders on the server, so the records are in
+        # the markup and the list screens are what to read.
+        console.print(
+            "\n[dim]No API to read, so drafting from the HTML of the pages "
+            "visited instead.[/dim]"
+        )
+        _draft_from_html(url, report.pages_visited, session)
+
+
+def _draft_from_html(base_url: str, urls: list[str], session) -> None:
+    """Fetch these screens and turn their repeated markup into a harvest config."""
+    from .web.draft import draft_from_pages
+    from .web.fetcher import Fetcher
+    from .web.harvest import dump_config
+
+    pages: list[tuple[str, str]] = []
+    with Fetcher(
+        base_url, cache_dir=WEB_CACHE, respect_robots=False, session=session
+    ) as fetcher:
+        for one in urls:
+            resp = fetcher.get(one)
+            if resp.ok and "html" in (resp.content_type or "html"):
+                pages.append((resp.url, resp.text))
+            else:
+                console.print(f"  [yellow]·[/yellow] {one}: HTTP {resp.status}, skipped")
+
+    if not pages:
+        console.print("[red]None of those pages could be read.[/red]")
+        raise typer.Exit(1)
+
+    config, warnings = draft_from_pages(pages, base_url)
+    path_out = dump_config(config, CONFIG_DIR / "harvest.draft.yaml")
+
+    if config.collections:
+        table = Table(title="What the markup looks like", header_style="bold")
+        table.add_column("Collection")
+        table.add_column("Rows selector", overflow="fold")
+        table.add_column("Fields", justify="right")
+        table.add_column("Key")
+        for collection in config.collections:
+            table.add_row(
+                collection.name,
+                collection.extract.rows or "—",
+                str(len(collection.extract.fields)),
+                collection.key or "[yellow]none[/yellow]",
+            )
+        console.print(table)
+
+    console.print(
+        f"\n[green]Drafted {len(config.collections)} collection(s) → {path_out}[/green]"
+    )
+    for warning in warnings:
+        console.print(f"  [yellow]•[/yellow] {warning}")
+    console.print(
+        f"\nReview it, then: [bold]mv {path_out} {HARVEST_CONFIG}[/bold] "
+        f"and run [bold]eagm harvest[/bold]"
+    )
+
+
+@app.command(name="draft-html")
+def draft_html(
+    url: str = typer.Argument(..., help="A list screen — the customers list, the quotes list"),
+    also: Optional[List[str]] = typer.Option(
+        None, "--also", help="Another list screen (repeatable)"
+    ),
+    anonymous: bool = typer.Option(False, "--anonymous", help="Ignore any stored session"),
+) -> None:
+    """Read a server-rendered list screen and draft the selectors to harvest it.
+
+    For a v2 with no JSON API: point this at each list screen and it works out
+    the repeated element, one field per column, the row id and the next-page
+    link. No browser needed — this is plain HTTP.
+    """
+    _settings()
+    session = None if anonymous else _load_session(url)
+    console.print(
+        f"[bold]Reading:[/bold] {url}"
+        + (" [green]authenticated[/green]" if session else " [yellow]anonymous[/yellow]")
+    )
+    if not session and not anonymous:
+        console.print(
+            "[dim]No session stored — if the app needs a login you will get the "
+            "login page. Run `eagm login` first.[/dim]"
+        )
+    _draft_from_html(url, [url, *(also or [])], session)
 
 
 @app.command()

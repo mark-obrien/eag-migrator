@@ -10,6 +10,8 @@ What it exercises:
   * three pagination styles: page numbers, offset/limit, and cursors
   * a POST search endpoint
   * cardholder data on the payments endpoint, so the scrubber has to earn it
+  * a server-rendered list screen under /legacy — no JSON anywhere, which is
+    what an older v2 install actually looks like
 """
 
 from __future__ import annotations
@@ -159,6 +161,37 @@ boot();
 </body></html>"""
 
 
+# The server-rendered half of the app: one table, many records, paginated with
+# ordinary links. No fetch(), no JSON — extraction has to come out of the HTML.
+LIST_HTML = """<!DOCTYPE html>
+<html><head><title>Customers — Clearview Ops</title></head>
+<body>
+<nav><a href="/legacy/customers">Customers</a> <a href="/logout">Log out</a></nav>
+<table class="listing">
+  <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>ZIP</th><th></th></tr></thead>
+  <tbody>
+%(rows)s
+  </tbody>
+</table>
+%(pager)s
+</body></html>"""
+
+LIST_ROW = """    <tr class="customer" data-id="%(id)s">
+      <td class="name"><a href="/legacy/customers/%(id)s">%(name)s</a></td>
+      <td class="email">%(email)s</td>
+      <td class="phone">%(phone)s</td>
+      <td class="zip">%(postal_code)s</td>
+      <td><a href="/legacy/customers/%(id)s/delete" data-confirm="Delete?">Delete</a></td>
+    </tr>"""
+
+LIST_PAGE_SIZE = 2
+
+# Every destructive URL the fixture is asked to serve lands here. A crawl that
+# leaves this empty is the whole point; asserting on it beats inferring from
+# response bodies.
+TOUCHED: list[str] = []
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -242,6 +275,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(APP_HTML % {"csrf_header": CSRF_HEADER, "csrf_value": CSRF_VALUE})
             return
 
+        if path.rstrip("/") == "/legacy/customers":
+            page = int((query.get("page") or ["1"])[0])
+            start = (page - 1) * LIST_PAGE_SIZE
+            chunk = CUSTOMERS[start:start + LIST_PAGE_SIZE]
+            pager = ""
+            if start + LIST_PAGE_SIZE < len(CUSTOMERS):
+                pager = f'<a href="/legacy/customers?page={page + 1}" rel="next">Next</a>'
+            self._send(LIST_HTML % {
+                "rows": "\n".join(LIST_ROW % c for c in chunk),
+                "pager": pager,
+            })
+            return
+
         screen = SCREENS.get(path.rstrip("/") or "/")
         if screen:
             title, endpoint = screen
@@ -254,6 +300,7 @@ class Handler(BaseHTTPRequestHandler):
         # Anything an explore pass should never reach. Reaching one is a bug.
         if any(k in path for k in
                ("delete", "send", "refund", "archive", "logout", "subscriptions")):
+            TOUCHED.append(path)
             self._send("<html><body>DESTRUCTIVE ACTION PERFORMED</body></html>")
             return
 
