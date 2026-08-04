@@ -468,6 +468,7 @@ DISCOVERY_EXAMPLES = {
     "crawl": {"crawl": {"start": "/x"}},
     "static": {"static": {"urls": ["/x"]}},
     "sequence": {"sequence": {"url": "/x/{n}"}},
+    "from_collection": {"from_collection": {"name": "other", "url": "/x/{value}"}},
 }
 
 

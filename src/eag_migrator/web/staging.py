@@ -103,6 +103,24 @@ class Staging:
             )
         ]
 
+    def column_values(self, name: str, column: str, limit: int = 0) -> list[str]:
+        """Distinct non-empty values of one column, for driving a later fetch.
+
+        A collection whose URLs come from another collection's ids reads them
+        through here, so it fetches only ids that exist rather than walking a
+        range and probing for them.
+        """
+        table = _check(name, "collection name")
+        field = _check(column, "column name")
+        sql = f'SELECT DISTINCT "{field}" v FROM "{table}" WHERE "{field}" IS NOT NULL'
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        try:
+            rows = self.conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            raise LookupError(f"{name}.{column}: {exc}") from exc
+        return [str(r["v"]) for r in rows if str(r["v"]).strip()]
+
     def sample(self, name: str, limit: int = 3) -> list[dict[str, Any]]:
         table = _check(name, "collection name")
         return [

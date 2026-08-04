@@ -383,6 +383,66 @@ collections:
           selector: "td.print-on-invoice input[checked]"
           attr: value
 
+  # --- Which jobs belong to which customer --------------------------------
+  # The app will not give us a foreign key, but it will answer the question:
+  # /customer/jobquotesmodal/{id} returns that customer's completed jobs. The
+  # rows carry no ids — only Vehicle, Part Number, Created and Stage as text —
+  # so this is not a join key by itself. What it is, is the app *asserting*
+  # membership: these jobs are this customer's. Match those four columns
+  # against the jobs collection and the link is reconstructed from the
+  # server's own answer rather than from guessing at names.
+  #
+  # The URLs come from the customers already harvested, so only ids that exist
+  # are fetched — customer ids are not a contiguous range (the surveyed one
+  # was 794 with 740 customers). `as: customer_id` records which customer each
+  # row came from, which is the whole point.
+  #
+  # Confirmed GET, idempotent, no CSRF header, id in the path. Requesting it
+  # directly also avoids the POST /job/checkchangeinshopid that the UI fires
+  # when a job modal is opened — see the note at the end of this file.
+  - name: customer_jobs
+    discover:
+      from_collection:
+        name: customers
+        column: id
+        url: /customer/jobquotesmodal/{value}
+        as: customer_id
+    extract:
+      type: html
+      rows: "#tab-job .nags-row:not(.nags-header-row)"
+      require: [customer_id]
+      fields:
+        - to: vehicle
+          selector: ".nags-column:nth-of-type(1)"
+        - to: part_number
+          selector: ".nags-column:nth-of-type(2)"
+        - to: created
+          selector: ".nags-column:nth-of-type(3)"
+        - to: stage
+          selector: ".nags-column:nth-of-type(4)"
+
+  - name: customer_quotes
+    discover:
+      from_collection:
+        name: customers
+        column: id
+        url: /customer/jobquotesmodal/{value}
+        as: customer_id
+    extract:
+      type: html
+      rows: "#tab-quotes .nags-row:not(.nags-header-row)"
+      require: [customer_id]
+      fields:
+        - to: vehicle
+          selector: ".nags-column:nth-of-type(1)"
+        - to: sent
+          selector: ".nags-column:nth-of-type(2)"
+        - to: total_due
+          selector: ".nags-column:nth-of-type(3)"
+    note: >-
+      Same fetch as customer_jobs, different tab — the second run costs no
+      requests because the response is already in the HTTP cache.
+
   # --- Payments: NOT YET, and not from this page --------------------------
   # The payments table on the job detail is populated over AJAX
   # (/payment/gettablerows/…, /job/getinvoicerows/…), so it is empty in the
@@ -413,15 +473,30 @@ collections:
 # harvesting there is no key to join on and the link has to be reconstructed
 # from the data itself.
 #
+# It was checked properly and it is genuinely absent: the job detail carries
+# no customer id, and /customer/jobquotesmodal/{id} — which knows perfectly
+# well which jobs are whose — renders them with no ids at all.
+#
+# But that endpoint is still the answer. It is the server telling us which
+# jobs belong to customer 794, and the `customer_jobs` collection above
+# captures exactly that. Each row gives (customer_id, vehicle, part_number,
+# created, stage), and every one of those four also appears on the job. So
+# the link is rebuilt by matching customer_jobs against jobs on
+#
+#     vehicle + part_number + created
+#
+# which is far stronger than any name match, because it is the application's
+# own assertion of membership rather than an inference about people.
+#
 # Do not match on name. 740 customers in one town will contain repeated
 # names, and a wrong link is silent — the job simply belongs to the wrong
 # person in v3, and nothing downstream complains.
 #
-# The order to try, best first:
+# If the composite above leaves jobs unmatched, fall back in this order:
 #   1. Account number, if it turns out to be populated on real records. It
 #      was empty on the surveyed job, so check a B2B one before relying on it.
 #   2. Normalised phone — digits only, last 10. Strongest of the free-text
-#      fields and the most likely to be unique.
+#      fields on the job and the most likely to be unique.
 #   3. Lowercased email, where present.
 #   4. Last name + zip, only to break ties, never on its own.
 #
@@ -438,12 +513,25 @@ collections:
 #                                    submitted. Reference catalogues, not shop
 #                                    records; v3 will have its own.
 #   /invoice                         blank. Invoicing lives in job detail.
+#   /customer "Export CSV"           a built-in customer export, JS-driven
+#                                    with no href. Worth running by hand: an
+#                                    independent copy of the customer list is
+#                                    the only real cross-check on the scrape.
 #   /reports/*                       date-ranged reports with CSV/XLS export.
 #                                    Not a raw table dump, so they do not
 #                                    replace row-level extraction — but
 #                                    "Customer Details Report" and "A/R Aging"
 #                                    are worth exporting by hand as a
 #                                    cross-check against what lands here.
+#
+# A note on why this reads pages directly rather than driving a browser.
+#
+# Opening a job in the UI fires POST /job/checkchangeinshopid alongside the
+# GET. Nobody has established what that POST does. Requesting
+# /job/manage/{id} directly gets the identical HTML fragment — the modal body
+# and the "detail page" are the same response — without the POST. Every URL
+# in this file is a GET, confirmed idempotent, so a full harvest issues no
+# request that could change anything.
 #
 # After harvesting:
 #

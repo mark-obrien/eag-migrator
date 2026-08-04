@@ -589,6 +589,91 @@ def test_require_must_name_a_field_that_exists():
         )
 
 
+def _related_config(app, **over) -> dict:
+    config = {
+        "site": {"base_url": app.url, "rate_limit_rps": 0, "respect_robots": False},
+        "collections": [
+            {
+                "name": "customers",
+                "key": "id",
+                "discover": {"crawl": {"start": "/legacy/customers",
+                                       "follow": r"/legacy/customers($|\?)",
+                                       "max_depth": 4}},
+                "extract": {
+                    "rows": "table.listing tbody tr.customer",
+                    "fields": [{"to": "id", "selector": ".", "attr": "data-id"}],
+                },
+            },
+            {
+                "name": "customer_jobs",
+                "discover": {
+                    "from_collection": {
+                        "name": "customers",
+                        "column": "id",
+                        "url": "/related/{value}",
+                        "as": "customer_id",
+                    }
+                },
+                "extract": {
+                    "rows": "#tab-job .nags-row:not(.nags-header-row)",
+                    "require": ["customer_id"],
+                    "fields": [
+                        {"to": "technician", "selector": ".nags-column:nth-of-type(1)"},
+                        {"to": "stage", "selector": ".nags-column:nth-of-type(2)"},
+                    ],
+                },
+            },
+        ],
+    }
+    config.update(over)
+    return config
+
+
+def test_urls_can_come_from_a_collection_already_harvested(app, session, tmp_path):
+    """The customer ids are not a range, so walking one would mostly miss."""
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(
+            HarvestConfig.model_validate(_related_config(app)),
+            staging, cache_dir=tmp_path / "c", session=session,
+        )
+        rows = staging.sample("customer_jobs", 50)
+
+    assert report.total_stored == 5 + 3          # 5 customers, 3 of their jobs
+    # Every child row keeps the parent it was fetched for — the relationship
+    # the app renders but never gives an id for.
+    assert {(r["customer_id"], r["technician"]) for r in rows} == {
+        ("5001", "Lee Park"), ("5001", "Jo Márquez"), ("5003", "Lee Park"),
+    }
+
+
+def test_it_fetches_only_ids_that_exist(app, session, tmp_path):
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(
+            HarvestConfig.model_validate(_related_config(app)),
+            staging, cache_dir=tmp_path / "c", session=session,
+        )
+
+    child = next(c for c in report.collections if c.name == "customer_jobs")
+    # Five customers, five requests. Not a walk over an id range.
+    assert child.discovered == 5
+    assert child.fetched == 5
+
+
+def test_a_missing_parent_collection_is_reported_not_a_crash(app, session, tmp_path):
+    config = _related_config(app)
+    config["collections"] = config["collections"][1:]        # drop customers
+
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(
+            HarvestConfig.model_validate(config),
+            staging, cache_dir=tmp_path / "c", session=session,
+        )
+
+    assert report.total_stored == 0
+    notes = " ".join(report.collections[0].notes)
+    assert "harvest that collection first" in notes
+
+
 def test_the_eag_v2_config_is_valid_and_says_what_it_covers():
     """The config written from the survey has to at least load and hold together."""
     from pathlib import Path
@@ -599,7 +684,18 @@ def test_the_eag_v2_config_is_valid_and_says_what_it_covers():
     by_name = {c.name: c for c in config.collections}
 
     assert {"customers", "quotes", "users", "purchase_orders", "jobs_board",
-            "jobs", "job_parts", "job_notes"} <= set(by_name)
+            "jobs", "job_parts", "job_notes",
+            "customer_jobs", "customer_quotes"} <= set(by_name)
+
+    # The customer->jobs link exists nowhere else, so these must be driven by
+    # the customers collection and must record which customer they came from.
+    for name in ("customer_jobs", "customer_quotes"):
+        spec = by_name[name].discover.from_collection
+        assert spec is not None and spec.name == "customers"
+        assert spec.store_as == "customer_id"
+        # And customers has to be harvested before them.
+        order = [c.name for c in config.collections]
+        assert order.index("customers") < order.index(name)
     for collection in config.collections:
         chosen = [k for k in DISCOVERY_KINDS if getattr(collection.discover, k)]
         assert len(chosen) == 1, collection.name

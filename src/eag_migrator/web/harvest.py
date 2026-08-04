@@ -138,7 +138,36 @@ class SequenceDiscovery(BaseModel):
         return self
 
 
-DISCOVERY_KINDS = ("sitemap", "api", "crawl", "static", "sequence")
+class FromCollectionDiscovery(BaseModel):
+    """URLs built from the ids another collection already harvested.
+
+    For a screen that only exists per-record — a per-customer detail fetch —
+    where the ids are not a contiguous range. Walking a range would probe
+    thousands of ids that do not exist; this fetches exactly the ones that do.
+
+    The named collection has to appear earlier in the file, since collections
+    are harvested in order.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    """The collection to take values from."""
+    column: str = "id"
+    url: str
+    """Must contain {value}, e.g. '/customer/jobquotesmodal/{value}'."""
+    store_as: str | None = Field(default=None, alias="as")
+    """Field name to record the value under, so the child row keeps its parent."""
+    limit: int = 0
+
+    @model_validator(mode="after")
+    def _has_placeholder(self) -> FromCollectionDiscovery:
+        if "{value}" not in self.url:
+            raise ValueError(f"from_collection url must contain {{value}}: {self.url!r}")
+        return self
+
+
+DISCOVERY_KINDS = ("sitemap", "api", "crawl", "static", "sequence", "from_collection")
 
 
 class Discovery(BaseModel):
@@ -147,6 +176,7 @@ class Discovery(BaseModel):
     crawl: CrawlDiscovery | None = None
     static: UrlDiscovery | None = None
     sequence: SequenceDiscovery | None = None
+    from_collection: FromCollectionDiscovery | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> Discovery:
@@ -179,17 +209,6 @@ class Extract(BaseModel):
     page without it is skipped and counted as a miss.
     """
 
-    @model_validator(mode="after")
-    def _require_names_exist(self) -> Extract:
-        known = {f.to for f in self.fields}
-        unknown = [n for n in self.require if n not in known]
-        if unknown:
-            raise ValueError(
-                f"require names a field that is not extracted: {', '.join(unknown)} "
-                f"(fields are {', '.join(sorted(known)) or 'none'})"
-            )
-        return self
-
 
 class Collection(BaseModel):
     name: str
@@ -199,6 +218,21 @@ class Collection(BaseModel):
     key: str | None = None
     """Field that uniquely identifies a record. Defaults to the URL."""
     note: str | None = None
+
+    @model_validator(mode="after")
+    def _require_names_exist(self) -> Collection:
+        # Checked here rather than on Extract because a from_collection may
+        # contribute a column that no field extracts.
+        known = {f.to for f in self.extract.fields}
+        if self.discover.from_collection and self.discover.from_collection.store_as:
+            known.add(self.discover.from_collection.store_as)
+        unknown = [n for n in self.extract.require if n not in known]
+        if unknown:
+            raise ValueError(
+                f"{self.name}: require names a field that is not extracted: "
+                f"{', '.join(unknown)} (fields are {', '.join(sorted(known)) or 'none'})"
+            )
+        return self
 
 
 class Site(BaseModel):
@@ -547,10 +581,17 @@ def _harvest_collection(
 
     cap = limit or max_pages
     columns = [f.to for f in collection.extract.fields]
+    disc = collection.discover
+    # The value a from_collection URL was built from, so a child row can keep
+    # the id of the parent it belongs to — which is often the only place that
+    # relationship exists.
+    carry = disc.from_collection.store_as if disc.from_collection else None
+    if carry and carry not in columns:
+        columns.append(carry)
     staging.ensure_table(collection.name, columns)
     rows: list[dict[str, Any]] = []
-
-    disc = collection.discover
+    parent_of: dict[str, str] = {}
+    urls: list[str] = []
 
     # --- JSON API: no HTML parsing at all ----------------------------------
     if disc.api:
@@ -600,6 +641,25 @@ def _harvest_collection(
             )
     elif disc.sequence:
         urls = _sequence_urls(fetcher, disc.sequence, cap)
+    elif disc.from_collection:
+        spec = disc.from_collection
+        try:
+            values = staging.column_values(spec.name, spec.column, spec.limit)
+        except LookupError as exc:
+            result.notes.append(
+                f"cannot read {spec.name}.{spec.column} — harvest that collection "
+                f"first, in the same run or an earlier one ({exc})"
+            )
+            values = []
+        for value in values:
+            one = urljoin(fetcher.base_url + "/", spec.url.format(value=value).lstrip("/"))
+            parent_of[one] = value
+            urls.append(one)
+        if not values:
+            result.notes.append(
+                f"{spec.name}.{spec.column} held no values, so there was nothing "
+                f"to fetch"
+            )
     else:
         urls = [
             urljoin(fetcher.base_url + "/", u.lstrip("/")) if not u.startswith("http") else u
@@ -667,6 +727,10 @@ def _harvest_collection(
             if len(result.errors) < 50:
                 result.errors.append({"url": url, "error": str(exc)})
             continue
+
+        if carry:
+            for record in found:
+                record[carry] = parent_of.get(url)
 
         if collection.extract.require:
             found = [

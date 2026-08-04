@@ -207,6 +207,10 @@ DETAIL_PART = """
     </div>"""
 
 # Ids 7001-7003 exist (they match APPOINTMENTS), with a gap at 7004+.
+# Which customer each job belongs to. The app knows; it just never says so in
+# a way you could join on. 5004 and 5005 own nothing.
+RELATED = {7001: 5001, 7002: 5001, 7003: 5003}
+
 JOB_PARTS = {
     7001: [("dw01234", "Windshield"), ("cal-001", "Calibration")],
     7002: [("fw02345", "Door glass")],
@@ -313,6 +317,27 @@ class Handler(BaseHTTPRequestHandler):
                 "rows": "\n".join(LIST_ROW % c for c in chunk),
                 "pager": "",
             })
+            return
+
+        # A per-customer fetch, keyed on a customer id that is nowhere near a
+        # contiguous range. It lists the customer's jobs — and, like the real
+        # thing, the rows carry no job ids at all.
+        if path.startswith("/related/"):
+            wanted = path.rsplit("/", 1)[-1]
+            owned = [a for a in APPOINTMENTS
+                     if str(RELATED.get(a["id"], "")) == wanted]
+            self._send(
+                '<div id="tab-job"><div class="nags-table">'
+                '<div class="nags-row nags-header-row">'
+                '<div class="nags-column">Vehicle</div>'
+                '<div class="nags-column">Stage</div></div>'
+                + "".join(
+                    f'<div class="nags-row"><div class="nags-column">{a["technician"]}'
+                    f'</div><div class="nags-column">{a["state"]}</div></div>'
+                    for a in owned
+                )
+                + "</div></div>"
+            )
             return
 
         if path.startswith("/job/manage/"):

@@ -370,6 +370,33 @@ fields:
 Several collections over the same URLs cost one crawl, not several — the HTTP
 cache means the second and third read from disk.
 
+#### When the relationship is only in a per-record screen
+
+Some apps know perfectly well which children belong to which parent and never
+put an id in the markup — a "their jobs" panel that renders vehicle and date
+and nothing you could join on. The panel is still the answer: it is the
+application asserting membership. `from_collection:` drives one collection
+from another's ids and records which parent each row came from:
+
+```yaml
+discover:
+  from_collection:
+    name: customers            # harvested earlier in this file
+    column: id
+    url: /customer/jobs/{value}
+    as: customer_id            # stamped onto every row fetched from that URL
+```
+
+Only ids that exist are fetched, which matters when they aren't a contiguous
+range — walking a range would probe thousands of gaps to find a few hundred
+records. The `as:` column is what makes the result a join table: whatever
+columns the panel renders, each row now carries the parent it belongs to, and
+those columns can be matched against the child collection to rebuild the
+foreign key the app never exposed.
+
+Naming a collection that hasn't been harvested is reported on the collection
+rather than raised — the run continues and the rest still lands.
+
 The crawler that walks the pagination has the same refusals as `--explore`: no
 "Delete", no "Refund", no "Log out", nothing carrying `data-method` or a
 confirmation prompt. Each refusal is reported on the collection.
@@ -799,7 +826,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-200 tests, in six groups:
+204 tests, in six groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
