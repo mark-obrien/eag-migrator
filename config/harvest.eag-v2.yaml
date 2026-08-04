@@ -1,0 +1,256 @@
+# EAG v2 — harvest config.
+#
+# Written from a survey of the live app, not from a run against it. Every
+# selector here came from real markup, but nothing has been executed yet:
+# treat the first `eagm harvest --limit 2` as the thing that proves it.
+#
+#   cp config/harvest.eag-v2.yaml config/harvest.yaml
+#   eagm login <url>            # or set EAGM_COOKIE in .env
+#   eagm harvest --limit 2      # two pages per collection, then read the report
+#   eagm staging                # look at what landed before running it all
+#
+# What the survey established:
+#   * No JSON API. Every screen is server-rendered; the only XHR on the page
+#     is analytics and Google Maps. So this is all HTML extraction.
+#   * Three different pagination schemes, one per screen. See each collection.
+#   * Customers have no detail URL — the id exists only in a data-id attribute.
+#   * The Jobs board is a curated dashboard, NOT a complete list of jobs.
+#   * There is no invoices or payments screen; that data lives in job detail
+#     and in the date-ranged reports under /reports.
+
+version: 1
+
+site:
+  base_url: https://zephyrglass.everythingautoglass.com
+  # An authenticated export of the owner's own records. Set deliberately:
+  # the app disallows crawlers so its logged-in area is not indexed, which is
+  # a rule about search engines, not about this.
+  respect_robots: false
+  requires_auth: true
+  # The app fires analytics on page load in the browser. This client does not
+  # execute JavaScript, so harvesting produces no analytics traffic at all —
+  # but it is still someone's production system. One request a second.
+  rate_limit_rps: 1.0
+  max_pages: 5000
+
+collections:
+
+  # --- Customers: 740 records, offset in the path -------------------------
+  # /customer/0, /customer/25, /customer/50 … page size is fixed at 25 and
+  # ?limit= is ignored, so the offset has to be walked. No stop is set: past
+  # the end the page comes back with no rows, and two of those in a row ends
+  # it. That way this keeps working as the customer count grows.
+  - name: customers
+    key: id
+    discover:
+      sequence:
+        url: /customer/{n}
+        start: 0
+        step: 25
+        stop_after_misses: 2
+    extract:
+      type: html
+      rows: "table#customer-table tr.customer-row"
+      fields:
+        - to: id
+          selector: "."              # the row itself — there is no detail link
+          attr: data-id
+        # The name cell is  <td>Dana<span class="lname">Reyes</span></td>.
+        # `own_text` reads the cell's own text and ignores the span, which is
+        # the only thing separating the two halves of the name.
+        - to: first_name
+          selector: "td:nth-of-type(1)"
+          attr: own_text
+        - to: last_name
+          selector: "td:nth-of-type(1) span.lname"
+        - to: full_name
+          selector: "td:nth-of-type(1)"
+        - to: phone
+          selector: "td:nth-of-type(2)"
+        - to: email
+          selector: "td:nth-of-type(3)"
+    note: >-
+      740 customers over 30 pages of 25. The Manage column holds a Delete
+      button, which is a JS modal rather than a link — nothing here can reach
+      it, since this client only ever issues GETs for the URLs above.
+
+  # --- Quotes: one page, no pagination ------------------------------------
+  - name: quotes
+    key: id
+    discover:
+      static:
+        urls: ["/quote"]
+    extract:
+      type: html
+      rows: "table.defaultTbl.mainTbl tr[data-id]"
+      fields:
+        - to: id
+          selector: "."
+          attr: data-id
+        - to: created
+          selector: "td.quote-created"
+        - to: customer_name
+          selector: "td:nth-of-type(2)"
+          note: >-
+            TODO: if this comes back as one run-on string, the cell has the
+            same <span class="lname"> split as customers — add own_text and a
+            second field for span.lname.
+        - to: vehicle
+          selector: "td:nth-of-type(3)"      # Year/Make/Model
+        - to: total_price
+          selector: "td:nth-of-type(4)"
+        - to: sent_at
+          selector: "td.sent-time"
+    note: >-
+      ~11 rows and an empty paginator. If the count here ever exceeds a page,
+      this needs a pagination scheme like the others.
+
+  # --- Users: one short page ----------------------------------------------
+  - name: users
+    discover:
+      static:
+        urls: ["/user"]
+    extract:
+      type: html
+      rows: "table.defaultTbl.mainTbl tr[id^='row-']"
+      fields:
+        - to: name
+          selector: "td:nth-of-type(1)"
+        - to: email
+          selector: "td:nth-of-type(2)"
+        - to: phone
+          selector: "td:nth-of-type(3)"
+        - to: search_count
+          selector: "td:nth-of-type(4)"
+        - to: help_requests
+          selector: "td:nth-of-type(5)"
+        - to: account_type
+          selector: "td:nth-of-type(6)"
+    note: >-
+      4 rows. No data-id on these, so `key:` is unset and rows key on page
+      position — fine for a list this size and this stable. The row id
+      attribute is "row-N"; if N turns out to be the user id, add
+      `- to: id, selector: ".", attr: id` and set key: id.
+
+  # --- Purchase orders: 41 pages, page number in the query ----------------
+  - name: purchase_orders
+    key: order_id
+    discover:
+      sequence:
+        url: /order/searchOrder?currentPage={n}
+        start: 1
+        stop_after_misses: 2
+    extract:
+      type: html
+      rows: "table.defaultTbl tr.part-order"
+      fields:
+        - to: order_id
+          selector: "td:nth-of-type(1)"      # text only — no id attribute here
+        - to: distributor
+          selector: "td:nth-of-type(2)"
+        - to: item_no
+          selector: "td:nth-of-type(3)"
+        - to: quantity
+          selector: "td:nth-of-type(4)"
+        - to: unit_price
+          selector: "td:nth-of-type(5)"
+        - to: order_date
+          selector: "td:nth-of-type(6)"
+        - to: delivery_date
+          selector: "td:nth-of-type(7)"
+        - to: job
+          selector: "td:nth-of-type(8)"
+    note: >-
+      "Page 1 of 41" at the time of the survey. No stop is set so it finds the
+      end itself.
+
+  # --- Jobs board: a dashboard, not a complete list -----------------------
+  # Eight tables on one page, one per status group, all table.defaultTbl
+  # .mainTbl. The selector below deliberately catches rows in all of them.
+  - name: jobs_board
+    key: id
+    discover:
+      static:
+        urls: ["/job"]
+    extract:
+      type: html
+      rows: "table.mainTbl tr.job-row"
+      fields:
+        - to: id
+          selector: "."
+          attr: data-id
+        - to: order_number
+          selector: "td:nth-of-type(1)"
+        - to: due_date
+          selector: "td:nth-of-type(2)"
+        - to: shop
+          selector: "td:nth-of-type(3)"
+        - to: customer_first
+          selector: "td:nth-of-type(4)"
+          attr: own_text
+        - to: customer_last
+          selector: "td:nth-of-type(4) span.lname"
+        - to: location
+          selector: "td:nth-of-type(5)"
+        - to: time_frame
+          selector: "td:nth-of-type(6)"
+        - to: installer
+          selector: "td:nth-of-type(7)"
+        - to: parts_status
+          selector: "td:nth-of-type(8)"
+        - to: stage
+          selector: "td:nth-of-type(9)"
+    note: >-
+      WARNING — this is a status board (New Dispatches, Due Today, Overdue,
+      Quotes, …), not every job. It showed 60 rows over 8 groups with no
+      pagination. Use it for the board's own state; use the jobs collection
+      below for the actual record set.
+
+  # --- Jobs, by id --------------------------------------------------------
+  # The only way to enumerate every job: /job/{id} loads a single record, so
+  # walk the ids. They are sparse wherever a job was deleted, hence the miss
+  # budget rather than stopping at the first gap.
+  #
+  # DISABLED until the detail page has been surveyed — the selectors below are
+  # placeholders and would harvest 2,000 pages of nulls. To finish it, inspect
+  # one /job/{id} page, then replace these fields and remove this comment.
+  #
+  # - name: jobs
+  #   key: id
+  #   discover:
+  #     sequence:
+  #       url: /job/{n}
+  #       start: 1
+  #       stop_after_misses: 100
+  #   extract:
+  #     type: html
+  #     # No `rows:` — a detail page is one record, so selectors run against
+  #     # the whole page.
+  #     fields:
+  #       - to: id
+  #         source: url
+  #       - to: status
+  #         selector: "TODO"
+  #       - to: customer_name
+  #         selector: "TODO"
+
+# Not harvestable as lists, and why:
+#
+#   /distributorpartssearch, /nags   search-gated — no rows until a query is
+#                                    submitted. Reference catalogues, not shop
+#                                    records; v3 will have its own.
+#   /invoice                         blank. Invoicing lives in job detail.
+#   /reports/*                       date-ranged reports with CSV/XLS export.
+#                                    Not a raw table dump, so they do not
+#                                    replace row-level extraction — but
+#                                    "Customer Details Report" and "A/R Aging"
+#                                    are worth exporting by hand as a
+#                                    cross-check against what lands here.
+#
+# After harvesting:
+#
+#   V2_DATABASE_URL=sqlite:////app/state/staging.sqlite
+#   eagm discover --side v2 && eagm scaffold
+#
+# From there it is an ordinary v2 database. Cleaning the values up is the
+# mapping's job — `phone`, `decimal`, `to_datetime`, `trim` all apply.

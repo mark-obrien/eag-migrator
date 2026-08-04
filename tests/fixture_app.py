@@ -275,6 +275,30 @@ class Handler(BaseHTTPRequestHandler):
             self._send(APP_HTML % {"csrf_header": CSRF_HEADER, "csrf_value": CSRF_VALUE})
             return
 
+        # An offset in the path, a fixed page size, no next-link — the shape a
+        # PHP-era list screen actually has. Ids are sparse on the detail route
+        # below, because records get deleted.
+        if path.startswith("/offset/customers"):
+            tail = path[len("/offset/customers"):].strip("/")
+            offset = int(tail) if tail.isdigit() else 0
+            chunk = CUSTOMERS[offset:offset + LIST_PAGE_SIZE]
+            self._send(LIST_HTML % {
+                "rows": "\n".join(LIST_ROW % c for c in chunk),
+                "pager": "",
+            })
+            return
+
+        if path.startswith("/record/"):
+            wanted = path.rsplit("/", 1)[-1]
+            found = next((c for c in CUSTOMERS if str(c["id"]) == wanted), None)
+            if not found:
+                # Present, but empty — the awkward case. A 404 is easy to spot;
+                # a 200 holding no records is what actually ends a walk.
+                self._send(LIST_HTML % {"rows": "", "pager": ""})
+                return
+            self._send(LIST_HTML % {"rows": LIST_ROW % found, "pager": ""})
+            return
+
         if path.rstrip("/") == "/legacy/customers":
             page = int((query.get("page") or ["1"])[0])
             start = (page - 1) * LIST_PAGE_SIZE

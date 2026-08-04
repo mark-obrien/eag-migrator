@@ -381,6 +381,137 @@ def test_the_crawler_never_follows_a_destructive_link(app, session, tmp_path):
     assert "/logout" in notes or "delete" in notes
 
 
+def _sequence_config(app, **seq) -> HarvestConfig:
+    spec = {"url": "/offset/customers/{n}", "start": 0, "step": 2,
+            "stop_after_misses": 2}
+    spec.update(seq)
+    return HarvestConfig.model_validate(
+        {
+            "site": {"base_url": app.url, "rate_limit_rps": 0, "respect_robots": False},
+            "collections": [
+                {
+                    "name": "customers",
+                    "key": "id",
+                    "discover": {"sequence": spec},
+                    "extract": {
+                        "rows": "table.listing tbody tr.customer",
+                        "fields": [
+                            {"to": "id", "selector": ".", "attr": "data-id"},
+                            {"to": "name", "selector": "td.name"},
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+
+def test_a_counter_in_the_url_walks_a_list_with_no_next_link(app, session, tmp_path):
+    """Offset pagination: /offset/customers/0, /2, /4 … page size fixed at 2."""
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(_sequence_config(app), staging, cache_dir=tmp_path / "c",
+                         session=session)
+        rows = staging.sample("customers", 50)
+
+    assert report.total_stored == 5
+    assert {r["id"] for r in rows} == {"5001", "5002", "5003", "5004", "5005"}
+
+
+def test_the_walk_stops_itself_rather_than_running_to_the_cap(app, session, tmp_path):
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(_sequence_config(app), staging, cache_dir=tmp_path / "c",
+                         session=session)
+
+    collection = report.collections[0]
+    # 3 pages of records, then 2 empty ones to prove the end. Not 5000.
+    assert collection.fetched == 5
+    assert any("stopped at" in n for n in collection.notes)
+
+
+def test_a_gap_in_the_ids_is_not_the_end_of_the_data(app, session, tmp_path):
+    """Ids are sparse wherever a record was deleted. One miss is a hole."""
+    config = HarvestConfig.model_validate(
+        {
+            "site": {"base_url": app.url, "rate_limit_rps": 0, "respect_robots": False},
+            "collections": [
+                {
+                    "name": "customers",
+                    "key": "id",
+                    "discover": {
+                        "sequence": {
+                            "url": "/record/{n}",
+                            "start": 5000,
+                            "stop": 5010,
+                            "stop_after_misses": 4,
+                        }
+                    },
+                    "extract": {
+                        "rows": "table.listing tbody tr.customer",
+                        "fields": [
+                            {"to": "id", "selector": ".", "attr": "data-id"},
+                            {"to": "name", "selector": "td.name"},
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(config, staging, cache_dir=tmp_path / "c", session=session)
+        rows = staging.sample("customers", 50)
+
+    # 5000 is a miss, 5001-5005 exist, 5006+ are misses. The leading gap must
+    # not end the walk before it reaches a single record.
+    assert report.total_stored == 5
+    assert {r["name"] for r in rows} == {
+        "Dana Reyes", "Sam Oyelaran", "Kit Nakamura", "Robin Vale", "Ash Whitfield",
+    }
+
+
+def test_a_name_split_by_nesting_comes_out_in_two_pieces(app, auth_fetcher):
+    """<td>Dana<span class="lname">Reyes</span></td> — v2 splits names this way."""
+    from eag_migrator.web.extract import extract_html, select_rows
+    from eag_migrator.web.harvest import FieldSpec
+
+    html = (
+        '<table class="t"><tr class="r" data-id="7">'
+        '<td class="name">Dana<span class="lname">Reyes</span></td></tr></table>'
+    )
+    fields = [
+        FieldSpec(to="first_name", selector="td.name", attr="own_text"),
+        FieldSpec(to="last_name", selector="td.name span.lname"),
+        FieldSpec(to="full_name", selector="td.name"),
+    ]
+    row = select_rows(html, "table.t tr.r")[0]
+    got = extract_html(html, "https://x/customer/0", fields, node=row)
+
+    assert got == {"first_name": "Dana", "last_name": "Reyes", "full_name": "Dana Reyes"}
+
+
+def test_the_eag_v2_config_is_valid_and_says_what_it_covers():
+    """The config written from the survey has to at least load and hold together."""
+    from pathlib import Path
+
+    from eag_migrator.web.harvest import DISCOVERY_KINDS, load_config
+
+    config = load_config(Path(__file__).resolve().parents[1] / "config" / "harvest.eag-v2.yaml")
+    by_name = {c.name: c for c in config.collections}
+
+    assert {"customers", "quotes", "users", "purchase_orders", "jobs_board"} <= set(by_name)
+    for collection in config.collections:
+        chosen = [k for k in DISCOVERY_KINDS if getattr(collection.discover, k)]
+        assert len(chosen) == 1, collection.name
+        assert collection.extract.rows, f"{collection.name} needs a rows selector"
+
+    # The two facts most likely to be lost in an edit: customers page by offset
+    # in steps of 25, and their name is split across a nested span.
+    customers = by_name["customers"]
+    assert customers.discover.sequence.step == 25
+    assert any(f.attr == "own_text" for f in customers.extract.fields)
+    # And the board is not a record source, so it must say so.
+    assert "not every job" in (by_name["jobs_board"].note or "")
+
+
 # --- cardholder data --------------------------------------------------------
 
 

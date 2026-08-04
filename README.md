@@ -296,6 +296,38 @@ Without `rows:`, selectors are read against the whole page and a list of fifty
 customers gives you **one** record. With it, each row is read relative to
 itself. It applies to any repeated block — table rows, cards, list items.
 
+`attr: own_text` reads an element's own text and ignores nested elements. Some
+apps split a name only by nesting:
+
+```html
+<td>Dana<span class="lname">Reyes</span></td>
+```
+
+`attr: text` gives you `Dana Reyes`; `own_text` on the cell gives `Dana` and a
+second field on `span.lname` gives `Reyes`.
+
+#### Pagination with nothing to follow
+
+`crawl:` works when there's a next link. When there isn't — an offset in the
+path, a page number in the query, or ids that have to be walked one at a time —
+use `sequence:`:
+
+```yaml
+discover:
+  sequence:
+    url: /customer/{n}       # or /order?currentPage={n}, or /job/{n}
+    start: 0
+    step: 25
+    stop_after_misses: 2     # consecutive empty pages that mean "the end"
+```
+
+No `stop:` is needed. Walking past the end returns pages with no rows, and a
+run of those ends it — so the config keeps working as the record count grows.
+The miss *budget* rather than stopping at the first one matters when walking
+ids: they're sparse wherever a record was ever deleted, and a single gap is a
+hole, not the end. A 200 response holding no records counts as a miss, not
+just a 404 — the awkward case is the one that ends a walk in practice.
+
 The crawler that walks the pagination has the same refusals as `--explore`: no
 "Delete", no "Refund", no "Log out", nothing carrying `data-method` or a
 confirmation prompt. Each refusal is reported on the collection.
@@ -725,7 +757,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-180 tests, in six groups:
+189 tests, in six groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -778,6 +810,7 @@ dialect-agnostic — all database access goes through SQLAlchemy.
 ```
 config/mapping.yaml        the mapping — the only thing that knows about EAG
 config/harvest.yaml        what to pull off the live site (web path only)
+config/harvest.eag-v2.yaml a starting config for EAG v2, written from a survey
 profiles/                  discovered schemas + site recon (gitignored: real data)
 reports/                   plan/run/verify/capture output (gitignored)
 state/migration.sqlite     checkpoints, id map, rollback journal (gitignored)

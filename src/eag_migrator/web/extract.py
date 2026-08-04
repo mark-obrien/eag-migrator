@@ -49,6 +49,15 @@ def _resolve_path(record: Any, path: str) -> Any:
 def _node_value(node: Any, attr: str, base_url: str | None) -> Any:
     if attr == "text":
         return node.get_text(" ", strip=True)
+    if attr == "own_text":
+        # This element's own text, ignoring nested elements. For markup like
+        #   <td>Dana<span class="lname">Reyes</span></td>
+        # where the two halves of a name are only distinguishable by nesting.
+        return " ".join(
+            part.strip()
+            for part in node.find_all(string=True, recursive=False)
+            if part.strip()
+        )
     if attr == "html":
         return node.decode_contents()
     value = node.get(attr)

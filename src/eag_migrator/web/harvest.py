@@ -105,19 +105,50 @@ class UrlDiscovery(BaseModel):
     urls: list[str]
 
 
+class SequenceDiscovery(BaseModel):
+    """Walk a counter in the URL: offset pages, page numbers, or record ids.
+
+    For screens with no link to follow — `/customer/0`, `/customer/25`, … —
+    and for enumerating detail pages by id when the list screen does not show
+    every record. Ids are sparse, so it stops after a run of misses rather
+    than at the first one.
+    """
+
+    url: str
+    """Must contain {n}, e.g. '/customer/{n}' or '/order?currentPage={n}'."""
+    start: int = 1
+    stop: int | None = None
+    """Last value, inclusive. Leave unset to run until the misses add up."""
+    step: int = 1
+    stop_after_misses: int = 25
+    """Consecutive URLs that 404 or hold no records before giving up."""
+
+    @model_validator(mode="after")
+    def _has_placeholder(self) -> SequenceDiscovery:
+        if "{n}" not in self.url:
+            raise ValueError(f"sequence url must contain {{n}}: {self.url!r}")
+        if self.step == 0:
+            raise ValueError("sequence step cannot be 0")
+        return self
+
+
+DISCOVERY_KINDS = ("sitemap", "api", "crawl", "static", "sequence")
+
+
 class Discovery(BaseModel):
     sitemap: SitemapDiscovery | None = None
     api: ApiDiscovery | None = None
     crawl: CrawlDiscovery | None = None
     static: UrlDiscovery | None = None
+    sequence: SequenceDiscovery | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> Discovery:
-        chosen = [n for n in ("sitemap", "api", "crawl", "static") if getattr(self, n)]
+        chosen = [n for n in DISCOVERY_KINDS if getattr(self, n)]
         if len(chosen) != 1:
             raise ValueError(
-                "discovery needs exactly one of: sitemap, api, crawl, static "
-                f"(got {chosen or 'none'})"
+                "discovery needs exactly one of: " + ", ".join(DISCOVERY_KINDS)
+                + f" (got {chosen or 'none'})"
             )
         return self
 
@@ -271,6 +302,18 @@ def _sitemap_urls(fetcher: Fetcher, limit: int) -> list[str]:
         pages, nested = _parse_sitemap(resp.text)
         urls.extend(pages)
         queue.extend(nested)
+    return urls
+
+
+def _sequence_urls(fetcher: Fetcher, spec: SequenceDiscovery, cap: int) -> list[str]:
+    """Every URL the counter produces, bounded. Misses are handled while fetching."""
+    urls: list[str] = []
+    n = spec.start
+    while len(urls) < cap:
+        if spec.stop is not None and (n > spec.stop if spec.step > 0 else n < spec.stop):
+            break
+        urls.append(urljoin(fetcher.base_url + "/", spec.url.format(n=n).lstrip("/")))
+        n += spec.step
     return urls
 
 
@@ -529,6 +572,8 @@ def _harvest_collection(
                 f"{len(refused)} link(s) not followed (state changes, logout): "
                 + ", ".join(list(refused)[:5])
             )
+    elif disc.sequence:
+        urls = _sequence_urls(fetcher, disc.sequence, cap)
     else:
         urls = [
             urljoin(fetcher.base_url + "/", u.lstrip("/")) if not u.startswith("http") else u
@@ -537,6 +582,12 @@ def _harvest_collection(
 
     urls = urls[:cap]
     result.discovered = len(urls)
+
+    # A counter walks past the end of the data — and over gaps in it, because
+    # ids are sparse wherever records have ever been deleted. A run of misses
+    # is the end; a single one is a hole.
+    miss_budget = disc.sequence.stop_after_misses if disc.sequence else 0
+    misses = 0
 
     for i, url in enumerate(urls, 1):
         say(collection.name, i, len(urls), url)
@@ -547,6 +598,15 @@ def _harvest_collection(
             result.failed += 1
             if len(result.errors) < 50:
                 result.errors.append({"url": url, "error": f"HTTP {resp.status}"})
+            if miss_budget:
+                misses += 1
+                if misses >= miss_budget:
+                    result.discovered = i
+                    result.notes.append(
+                        f"stopped at {url} after {misses} in a row with nothing on "
+                        f"them — raise stop_after_misses if the gap was real"
+                    )
+                    break
             continue
         result.fetched += 1
 
@@ -556,7 +616,9 @@ def _harvest_collection(
             elif collection.extract.rows:
                 soup = BeautifulSoup(resp.text, "lxml")
                 elements = select_rows(resp.text, collection.extract.rows, soup)
-                if not elements and len(result.notes) < 5:
+                # Walking a counter, an empty page is the expected way to find
+                # the end. Only flag it when every page was supposed to have rows.
+                if not elements and not miss_budget and len(result.notes) < 5:
                     result.notes.append(
                         f"rows selector {collection.extract.rows!r} matched nothing on "
                         f"{url} — check it against the real markup"
@@ -579,6 +641,19 @@ def _harvest_collection(
             if len(result.errors) < 50:
                 result.errors.append({"url": url, "error": str(exc)})
             continue
+
+        if miss_budget:
+            if found:
+                misses = 0
+            else:
+                misses += 1
+                if misses >= miss_budget:
+                    result.discovered = i
+                    result.notes.append(
+                        f"stopped at {url} after {misses} in a row with nothing on "
+                        f"them — raise stop_after_misses if the gap was real"
+                    )
+                    break
 
         for position, extracted in enumerate(found):
             rows.append(
