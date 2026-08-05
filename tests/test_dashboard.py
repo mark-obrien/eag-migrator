@@ -964,3 +964,43 @@ def test_promoting_over_an_existing_config_keeps_the_old_one(workspace, client):
     assert "new.example" in dash.HARVEST_FILE.read_text()
     assert "old.example" in (dash.CONFIG_DIR / "harvest.yaml.bak").read_text()
     assert not dash.HARVEST_DRAFT.exists()
+
+
+# --- the reorganised overview -----------------------------------------------
+
+
+def test_overview_reads_as_a_numbered_pipeline(client):
+    """The cards are one flow — connect v2, extract, connect v3, map, migrate."""
+    page = client.get("/").text
+    for phase in ("Connect to v2", "Extract into staging", "Connect to v3",
+                  "Map v2", "Migrate"):
+        assert phase in page, phase
+    # A single status strip up top, not a count buried in each card.
+    assert "nothing staged" in page
+    assert "not connected" in page
+
+
+def test_the_status_strip_tracks_what_is_ready(client, workspace):
+    from eag_migrator.web.session import Session
+
+    Session.from_cookie_header("sid=x", "https://v2.example").save(dash.SESSION_FILE)
+    import sqlite3
+    dash.STAGING_DB.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(dash.STAGING_DB).executescript(
+        "CREATE TABLE customers(_id INTEGER PRIMARY KEY, name TEXT);"
+        "INSERT INTO customers VALUES (1, 'Dana'), (2, 'Sam');"
+    )
+    page = client.get("/").text
+    assert "v2 ready" in page          # a session counts as reachable
+    assert "2 rows staged" in page
+
+
+def test_harvest_is_gated_on_a_live_config(client, workspace):
+    """The harvest button stays disabled until a config is made live."""
+    page = client.get("/").text
+    assert "make a harvest config live first" in page   # the disabled reason
+
+
+def test_migrate_is_gated_on_a_valid_mapping(client):
+    page = client.get("/").text
+    assert "Needs a valid mapping first" in page

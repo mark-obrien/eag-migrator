@@ -2,6 +2,30 @@
 {% block nav_home %}on{% endblock %}
 {% block content %}
 {% set s = status %}
+{% set v2db = s.databases | selectattr('side', 'equalto', 'v2') | first %}
+{% set v3db = s.databases | selectattr('side', 'equalto', 'v3') | first %}
+{% set v2_ready = (v2db and v2db.ok) or s.session.present %}
+{% set v3_ready = (v3db and v3db.ok) or s.v3api.ready %}
+{% set staged = s.staging.present and s.staging.tables %}
+{% set map_ready = s.mapping.present and s.mapping.valid %}
+
+<style>
+  .phase { display:inline-flex; align-items:center; justify-content:center;
+           width:22px; height:22px; border-radius:50%; background:var(--accent);
+           color:#fff; font-size:12px; font-weight:700; margin-right:9px;
+           flex:0 0 auto; }
+  .phase.done { background:var(--ok); }
+  .card h2 { display:flex; align-items:center; }
+  .flow { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; }
+  .flow a { display:flex; align-items:center; gap:7px; text-decoration:none;
+            color:var(--text); font-size:13.5px; }
+  .flow .dot { width:9px; height:9px; border-radius:50%; background:var(--dim); }
+  .flow .dot.ok { background:var(--ok); } .flow .dot.warn { background:var(--warn); }
+  .flow .sep { color:var(--line); }
+  .sub { border-top:1px solid var(--line); margin-top:16px; padding-top:14px; }
+  .sub:first-of-type { border-top:0; margin-top:0; padding-top:0; }
+  .sub h3 { margin-top:0; }
+</style>
 
 {% if request.query_params.get('err') %}
   <div class="flash err">{{ request.query_params.get('err') }}</div>
@@ -9,7 +33,7 @@
   <div class="flash msg">{{ request.query_params.get('msg') }}</div>
 {% endif %}
 
-<!-- Running job ---------------------------------------------------------- -->
+<!-- Running job (kept outside .grid so the log survives a status refresh) -->
 <div id="job-panel" class="card wide" style="{% if not s.last_job %}display:none{% endif %}">
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
     <h2 style="margin:0"><span id="job-label">{{ s.last_job.label if s.last_job }}</span></h2>
@@ -27,308 +51,361 @@
 
 <div class="grid">
 
-  <!-- Connections -------------------------------------------------------- -->
-  <div class="card">
-    <h2>Connections</h2>
-    {% for db in s.databases %}
+  <!-- Where things stand ------------------------------------------------- -->
+  <div class="card wide">
+    <div class="flow">
+      <a href="#v2"><span class="dot {{ 'ok' if v2_ready else 'warn' }}"></span>
+        v2 {{ 'ready' if v2_ready else 'not connected' }}</a>
+      <span class="sep">→</span>
+      <a href="#extract"><span class="dot {{ 'ok' if staged else '' }}"></span>
+        {% if staged %}{{ "{:,}".format(s.staging.tables | sum(attribute='rows')) }} rows staged
+        {% else %}nothing staged{% endif %}</a>
+      <span class="sep">→</span>
+      <a href="#v3"><span class="dot {{ 'ok' if v3_ready else 'warn' }}"></span>
+        v3 {{ 'ready' if v3_ready else 'not connected' }}</a>
+      <span class="sep">→</span>
+      <a href="#map"><span class="dot {{ 'ok' if map_ready else '' }}"></span>
+        {% if map_ready %}mapping ready{% if s.mapping.open_todos %},
+          {{ s.mapping.open_todos }} TODO{% endif %}
+        {% else %}no mapping{% endif %}</a>
+      <span class="sep">→</span>
+      <a href="#migrate"><span class="dot {{ 'ok' if s.last_job and s.last_job.status == 'done' else '' }}"></span>
+        {% if s.runs %}{{ s.runs | length }} run(s){% else %}not migrated{% endif %}</a>
+    </div>
+  </div>
+
+  <!-- 1 — Connect to v2 -------------------------------------------------- -->
+  <div class="card" id="v2">
+    <h2><span class="phase {{ 'done' if v2_ready else '' }}">1</span>Connect to v2</h2>
+    <p class="muted">The source. A database if you have one, otherwise a signed-in
+      web session.</p>
+
+    <div class="sub">
       <div class="row">
-        <span class="k">{{ db.side }}</span>
+        <span class="k">database</span>
         <span>
-          {% if not db.configured %}
-            <span class="pill warn">not configured</span>
-          {% elif db.ok %}
-            <span class="pill ok">connected</span>
-          {% else %}
-            <span class="pill bad">unreachable</span>
-          {% endif %}
+          {% if not (v2db and v2db.configured) %}<span class="pill">not configured</span>
+          {% elif v2db.ok %}<span class="pill ok">connected</span>
+          {% else %}<span class="pill bad">unreachable</span>{% endif %}
         </span>
       </div>
-      {% if db.configured %}
-        <div class="mono muted" style="word-break:break-all">{{ db.url }}</div>
+      {% if v2db and v2db.configured %}
+        <div class="mono muted" style="word-break:break-all">{{ v2db.url }}</div>
+        {% if not v2db.ok %}<div class="note">{{ v2db.message }}</div>{% endif %}
+      {% else %}
+        <div class="muted">Set <span class="mono">V2_DATABASE_URL</span> in
+          <span class="mono">.env</span>, or use a web session below.</div>
       {% endif %}
-      {% if db.configured and not db.ok %}
-        <div class="note">{{ db.message }}</div>
-      {% endif %}
-    {% endfor %}
-    {% if s.api_sink %}
-      <div class="row"><span class="k">v3 sink</span><span>HTTP API</span></div>
-    {% endif %}
-    <p class="muted" style="margin-top:10px">Set these in <span class="mono">.env</span>.</p>
-  </div>
+    </div>
 
-  <!-- v2 session --------------------------------------------------------- -->
-  <div class="card">
-    <h2>v2 session</h2>
-    {% if s.session.present %}
-      <div class="row"><span class="k">origin</span><span class="mono">{{ s.session.origin }}</span></div>
-      <div class="row">
-        <span class="k">age</span>
-        <span class="{{ 'warn' if s.session.stale else 'ok' }}">{{ s.session.age_hours }}h</span>
-      </div>
-      <div class="muted" style="margin-top:6px">{{ s.session.describe }}</div>
-      {% if s.session.stale %}
-        <div class="note">Older than 12h — if calls start returning 401, sign in again.</div>
-      {% endif %}
-      <form method="post" action="/actions/logout{{ q }}" class="actions">
-        <button class="danger">Delete session</button>
-      </form>
-    {% else %}
-      <p class="muted">No session yet. Two ways in.</p>
-
-      <form method="post" action="/actions/login-form{{ q }}">
-        <label style="margin-top:0"><strong>Sign in for me</strong> — drives the
-          app's real login page in a browser</label>
-        <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-        <label>Email / username</label>
-        <input type="text" name="username" autocomplete="off" required>
-        <label>Password</label>
-        <input type="password" name="password" autocomplete="off" required>
-        <label>Login page path</label>
-        <input type="text" name="login_url" value="/login">
-        <label>A CSS selector only present once signed in (recommended)</label>
-        <input type="text" name="success_selector" placeholder=".dashboard, #app, nav.main">
-        <div class="actions">
-          <button class="primary" {% if not s.browser.available %}disabled
-            title="this image has no browser — paste a Cookie header instead"{% endif %}>
-            Sign in</button>
-        </div>
-      </form>
-      {% if not s.browser.available %}
-        <div class="note">This image has no browser, so signing in for you is
-          unavailable. Use the Cookie header below instead — it needs no browser.</div>
-      {% endif %}
-      <p class="muted" style="margin-top:8px">
-        The password fills the form and is then dropped — only the resulting
-        cookies and auth headers are stored. Needs Chromium in the image
-        (<span class="mono">make build-browser</span>), and it cannot get past
-        MFA or a captcha.
-      </p>
-
-      <details style="margin-top:14px">
-        <summary>Or paste a Cookie header instead (no password handled)</summary>
-        <form method="post" action="/actions/login{{ q }}" style="margin-top:10px">
-          <label>v2 URL</label>
-          <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-          <label>Cookie header — devtools → Network → any request</label>
-          <textarea name="cookies" rows="3" placeholder="sid=…; csrf=…"></textarea>
-          <div class="muted">Leave blank to use <span class="mono">EAGM_COOKIE</span>.</div>
-          <div class="actions"><button>Save session</button></div>
+    <div class="sub">
+      <h3>Web session</h3>
+      {% if s.session.present %}
+        <div class="row"><span class="k">origin</span>
+          <span class="mono">{{ s.session.origin }}</span></div>
+        <div class="row"><span class="k">age</span>
+          <span class="{{ 'warn' if s.session.stale else 'ok' }}">{{ s.session.age_hours }}h</span></div>
+        <div class="muted" style="margin-top:6px">{{ s.session.describe }}</div>
+        {% if s.session.stale %}
+          <div class="note">Older than 12h — if calls start returning 401, sign in again.</div>
+        {% endif %}
+        <form method="post" action="/actions/logout{{ q }}" class="actions">
+          <button class="danger">Delete session</button>
         </form>
-      </details>
-    {% endif %}
+      {% else %}
+        <form method="post" action="/actions/login-form{{ q }}">
+          <label style="margin-top:0"><strong>Sign in for me</strong> — drives the
+            app's real login page in a browser</label>
+          <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+          <label>Email / username</label>
+          <input type="text" name="username" autocomplete="off" required>
+          <label>Password</label>
+          <input type="password" name="password" autocomplete="off" required>
+          <label>Login page path</label>
+          <input type="text" name="login_url" value="/login">
+          <label>A CSS selector only present once signed in (recommended)</label>
+          <input type="text" name="success_selector" placeholder=".dashboard, #app, nav.main">
+          <div class="actions">
+            <button class="primary" {% if not s.browser.available %}disabled
+              title="this image has no browser — paste a Cookie header instead"{% endif %}>
+              Sign in</button>
+          </div>
+        </form>
+        <p class="muted" style="margin-top:8px">
+          The password fills the form and is then dropped — only the resulting
+          cookies are stored. Needs Chromium
+          (<span class="mono">make build-browser</span>), and cannot pass MFA
+          or a captcha.
+        </p>
+
+        <details style="margin-top:6px" {% if not s.browser.available %}open{% endif %}>
+          <summary>Or paste a Cookie header (no password, no browser)</summary>
+          <form method="post" action="/actions/login{{ q }}" style="margin-top:10px">
+            <label>v2 URL</label>
+            <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+            <label>Cookie header — devtools → Network → any request</label>
+            <textarea name="cookies" rows="3" placeholder="sid=…; csrf=…"></textarea>
+            <div class="muted">Leave blank to use <span class="mono">EAGM_COOKIE</span>.</div>
+            <div class="actions"><button>Save session</button></div>
+          </form>
+        </details>
+      {% endif %}
+    </div>
   </div>
 
-  <!-- Read v2 over HTTP -------------------------------------------------- -->
-  <div class="card">
-    <h2>Read v2 over HTTP</h2>
-    <p class="muted">Only needed when there is no database access.</p>
-
-    <form method="post" action="/actions/recon{{ q }}">
-      <label>1 — Recon: what is this app?</label>
-      <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-      <div class="actions"><button>Recon</button></div>
-    </form>
+  <!-- 2 — Extract v2 into staging --------------------------------------- -->
+  <div class="card" id="extract">
+    <h2><span class="phase {{ 'done' if staged else '' }}">2</span>Extract into staging</h2>
+    <p class="muted">Only for the web path — pull v2 into a local database the
+      mapping can read. Skip it if v2 is a database.</p>
 
     {% if not s.browser.available %}
-      <div class="note" style="margin-top:12px">
-        <strong>No browser in this image.</strong> Capture and “sign in for me”
-        both need one — {{ s.browser.reason }}.
-        <pre style="margin-top:6px;white-space:pre-wrap">{{ s.browser.hint }}</pre>
-      </div>
+      <div class="note">No browser in this image, so Capture and “sign in for me”
+        are unavailable — {{ s.browser.reason }}. Recon and “Draft from HTML”
+        still work; they need no browser.</div>
     {% endif %}
 
-    <form method="post" action="/actions/capture{{ q }}" style="margin-top:14px">
-      <label>2 — Capture: record the API it calls</label>
-      <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-      <label>Pages to drive, one per line</label>
-      <textarea name="paths" rows="3">/customers
+    <div class="sub">
+      <h3>a · Find the data</h3>
+      <form method="post" action="/actions/recon{{ q }}">
+        <label style="margin-top:0">Recon — what is this app, and is it behind a login?</label>
+        <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+        <div class="actions"><button>Recon</button></div>
+      </form>
+
+      <form method="post" action="/actions/capture{{ q }}" style="margin-top:14px">
+        <label>Capture — record the JSON API it calls (needs a browser)</label>
+        <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+        <label>Pages to drive, one per line</label>
+        <textarea name="paths" rows="3">/customers
 /quotes
 /schedule</textarea>
-      <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
-        <input type="checkbox" name="explore" value="1" style="width:auto">
-        Follow the app's own navigation to find more screens
-      </label>
-      <div class="muted">Never follows anything that reads as a state change —
-        delete, refund, send, archive, log out — and says what it left alone.</div>
-      <div class="actions">
-        <button {% if not s.browser.available %}disabled
-          title="this image has no browser — see the note above"{% endif %}>Capture</button>
-      </div>
-    </form>
-
-    <form method="post" action="/actions/draft-html{{ q }}" style="margin-top:14px">
-      <label>2b — Or read the HTML, if there is no API</label>
-      <input type="text" name="url"
-             placeholder="https://shop.everythingautoglass.com/customers" required>
-      <label>More list screens, one per line</label>
-      <textarea name="paths" rows="2" placeholder="/quotes
-/invoices"></textarea>
-      <div class="muted">For a v2 that renders on the server. Works out the
-        repeated row, a field per column, the row id and the next-page link.
-        No browser needed.</div>
-      <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
-        <input type="checkbox" name="assist" value="1" style="width:auto"
-               {% if not s.assist.available %}disabled{% endif %}>
-        Let a model read the structure too
-      </label>
-      <div class="muted">
-        {%- if s.assist.available %}
-          One call per screen, never per record. Every value is stripped before
-          the request — the model sees <code>&lt;td class="email"&gt;EMAIL&lt;/td&gt;</code>,
-          never an address — and its selectors are run against the page before
-          being kept.
-        {%- else %}
-          Needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>. Without it
-          the built-in heuristics are used.
-        {%- endif %}
-      </div>
-      <div class="actions"><button>Draft from HTML</button></div>
-    </form>
-
-    <form method="post" action="/actions/harvest{{ q }}" style="margin-top:14px">
-      <label>3 — Harvest into staging</label>
-      <input type="number" name="limit" value="0" min="0">
-      <div class="muted">0 = everything. Set a small number for a trial run.</div>
-      <div class="actions">
-        <button {% if not s.harvest.present %}disabled title="promote a harvest config first"{% endif %}>Harvest</button>
-      </div>
-    </form>
-
-    {% if s.harvest.draft %}
-      <form method="post" action="/actions/promote{{ q }}" class="actions">
-        <input type="hidden" name="which" value="harvest">
-        <button class="primary">Promote harvest draft →</button>
-      </form>
-      {% if s.harvest.present %}
-        <div class="muted">Replaces the current config; the old one is kept
-          as <code>harvest.yaml.bak</code>.</div>
-      {% endif %}
-    {% endif %}
-
-    {% if s.configs %}
-      <form method="post" action="/actions/use-config{{ q }}" style="margin-top:14px">
-        <label>Or use a config from <code>config/</code></label>
-        <select name="name">
-          {% for c in s.configs %}
-            <option value="{{ c.name }}">{{ c.name }}{% if c.example %} (example){% endif %}</option>
-          {% endfor %}
-        </select>
-        <div class="actions"><button>Make it the harvest config</button></div>
-      </form>
-    {% endif %}
-    {% if s.harvest.present and s.harvest.valid %}
-      <h3>Collections</h3>
-      {% for c in s.harvest.collections %}
-        <div class="row"><span>{{ c.name }}</span>
-          <span class="muted">{{ c.kind }} · {{ c.fields }} fields{% if c.rows %}
-            · rows{% endif %}</span></div>
-      {% endfor %}
-    {% elif s.harvest.present %}
-      <div class="note">{{ s.harvest.message }}</div>
-    {% endif %}
-  </div>
-
-  <!-- v3's API ----------------------------------------------------------- -->
-  <div class="card">
-    <h2>v3 API</h2>
-    <p class="muted">
-      {% if s.v3api.ready %}
-        <span class="ok">{{ s.v3api.base_url }}</span> — {{ s.v3api.describe }}
-        {% if s.v3api.age_hours is not none %}
-          · saved {{ s.v3api.age_hours }}h ago{% if s.v3api.stale %}
-            <span class="warn">(may have expired)</span>{% endif %}
-        {% endif %}
-      {% else %}
-        Not connected — {{ s.v3api.describe }}.
-      {% endif %}
-    </p>
-
-    <details {% if not s.v3api.ready %}open{% endif %}>
-      <summary>Connect</summary>
-      <form method="post" action="/actions/v3-connect{{ q }}">
-        <label>v3 base URL</label>
-        <input type="text" name="base_url" placeholder="https://shop.eagsoftware.com"
-               value="{{ s.v3api.base_url or '' }}" required>
-        <label>Cookie header from a signed-in v3 tab</label>
-        <input type="password" name="cookie" placeholder="name=value; other=value"
-               autocomplete="off">
-        <div class="muted">devtools → Network → any request → copy the whole
-          Cookie header. Stored in <code>state/v3_session.json</code> at mode
-          0600, never rendered back.</div>
+        <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
+          <input type="checkbox" name="explore" value="1" style="width:auto">
+          Follow the app's own navigation to find more screens
+        </label>
+        <div class="muted">Never follows a state change — delete, refund, send,
+          log out — and reports what it left alone.</div>
         <div class="actions">
-          <button class="primary">Save session</button>
+          <button {% if not s.browser.available %}disabled
+            title="this image has no browser"{% endif %}>Capture</button>
         </div>
       </form>
-      {% if s.v3api.saved %}
-        <form method="post" action="/actions/v3-forget{{ q }}" class="actions">
-          <button class="danger">Delete stored session</button>
+
+      <form method="post" action="/actions/draft-html{{ q }}" style="margin-top:14px">
+        <label>Draft from HTML — for a server-rendered v2 with no API</label>
+        <input type="text" name="url"
+               placeholder="https://shop.everythingautoglass.com/customers" required>
+        <label>More list screens, one per line</label>
+        <textarea name="paths" rows="2" placeholder="/quotes
+/invoices"></textarea>
+        <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
+          <input type="checkbox" name="assist" value="1" style="width:auto"
+                 {% if not s.assist.available %}disabled{% endif %}>
+          Let a model read the structure too
+        </label>
+        <div class="muted">
+          {%- if s.assist.available %}
+            One call per screen, never per record. Values are stripped before the
+            request — the model sees <code>&lt;td class="email"&gt;EMAIL&lt;/td&gt;</code>,
+            not an address — and its selectors are run against the page before use.
+          {%- else %}
+            Needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>. Without it,
+            the built-in heuristics are used.
+          {%- endif %}
+        </div>
+        <div class="actions"><button>Draft from HTML</button></div>
+      </form>
+    </div>
+
+    <div class="sub">
+      <h3>b · Choose the config, then harvest</h3>
+      {% if s.harvest.present and s.harvest.valid %}
+        <div class="row"><span class="k">live config</span>
+          <span class="ok">{{ s.harvest.base_url }}</span></div>
+        {% for c in s.harvest.collections %}
+          <div class="row"><span>{{ c.name }}</span>
+            <span class="muted">{{ c.kind }} · {{ c.fields }} fields{% if c.rows %} · rows{% endif %}</span></div>
+        {% endfor %}
+      {% elif s.harvest.present %}
+        <div class="note">Current config is invalid: {{ s.harvest.message }}</div>
+      {% else %}
+        <p class="muted">No harvest config is live yet.</p>
+      {% endif %}
+
+      {% if s.harvest.draft %}
+        <form method="post" action="/actions/promote{{ q }}" class="actions" style="margin-top:10px">
+          <input type="hidden" name="which" value="harvest">
+          <button class="primary">Promote harvest draft →</button>
+        </form>
+        {% if s.harvest.present %}
+          <div class="muted">Replaces the live config; the old one is kept as
+            <span class="mono">harvest.yaml.bak</span>.</div>
+        {% endif %}
+      {% endif %}
+
+      {% if s.configs %}
+        <form method="post" action="/actions/use-config{{ q }}" style="margin-top:12px">
+          <label>Use a config from <span class="mono">config/</span></label>
+          <select name="name">
+            {% for c in s.configs %}
+              <option value="{{ c.name }}">{{ c.name }}{% if c.example %} (example){% endif %}</option>
+            {% endfor %}
+          </select>
+          <div class="actions"><button>Make it live</button></div>
         </form>
       {% endif %}
-    </details>
 
-    <form method="post" action="/actions/api-get{{ q }}" style="margin-top:14px">
-      <label>Read an endpoint</label>
-      <input type="text" name="path" value="/api/V1/pricing-profiles" required>
-      <div class="muted">Pull what the mapping needs before writing anything —
-        the UUIDs behind pricing profiles, locations, payment terms and users,
-        and the codes behind v3's enums.</div>
-      <div class="actions">
-        <button {% if not s.v3api.ready %}disabled title="connect first"{% endif %}>GET</button>
-      </div>
-    </form>
-
-    <details style="margin-top:14px">
-      <summary>Send one record (creates it)</summary>
-      <form method="post" action="/actions/api-post{{ q }}">
-        <label>Endpoint</label>
-        <input type="text" name="path" value="/api/V1/customers" required>
-        <label>JSON body</label>
-        <textarea name="body" rows="5">{"customerName": "ZZ Migration Test"}</textarea>
-        <div class="muted">Exercises the same client and response handling a
-          real migration uses, so a 200 that means “rejected” shows up here
-          rather than 400 records in. Expect the first attempt to fail — v3
-          names the fields it wanted.</div>
-        <label>Type <code>write</code> to confirm</label>
-        <input type="text" name="confirm" autocomplete="off">
+      <form method="post" action="/actions/harvest{{ q }}" style="margin-top:14px">
+        <label>Harvest into staging</label>
+        <input type="number" name="limit" value="0" min="0">
+        <div class="muted">0 = everything. A small number is a trial run — do that first.</div>
         <div class="actions">
-          <button class="danger" {% if not s.v3api.ready %}disabled{% endif %}>POST</button>
+          <button {% if not (s.harvest.present and s.harvest.valid) %}disabled
+            title="make a harvest config live first"{% endif %}>Harvest</button>
         </div>
       </form>
-    </details>
+    </div>
+
+    <div class="sub">
+      <h3>c · What landed</h3>
+      {% if staged %}
+        {% for t in s.staging.tables %}
+          <div class="row">
+            <a href="/staging?table={{ t.name }}{% if token %}&token={{ token }}{% endif %}">{{ t.name }}</a>
+            <span class="mono">{{ "{:,}".format(t.rows) }}</span>
+          </div>
+        {% endfor %}
+        <p class="muted" style="margin-top:10px">To migrate from this, point
+          <span class="mono">V2_DATABASE_URL</span> at
+          <span class="mono">sqlite:////app/state/staging.sqlite</span>.</p>
+      {% else %}
+        <p class="muted">Nothing harvested yet.</p>
+      {% endif %}
+    </div>
   </div>
 
-  <!-- Schema + mapping --------------------------------------------------- -->
-  <div class="card">
-    <h2>Schema &amp; mapping</h2>
-    <form method="post" action="/actions/discover{{ q }}">
-      <label>Introspect</label>
-      <select name="side">
-        <option value="both">both</option><option value="v2">v2</option><option value="v3">v3</option>
-      </select>
-      <div class="actions"><button>Discover</button></div>
-    </form>
+  <!-- 3 — Connect to v3 -------------------------------------------------- -->
+  <div class="card" id="v3">
+    <h2><span class="phase {{ 'done' if v3_ready else '' }}">3</span>Connect to v3</h2>
+    <p class="muted">The destination. A database, or its HTTP API.</p>
 
-    <form method="post" action="/actions/scaffold{{ q }}" class="actions">
-      <button>Scaffold mapping draft</button>
-    </form>
-
-    {% if s.mapping.present and s.mapping.valid %}
-      <div class="row"><span class="k">entities</span>
-        <span>{{ s.mapping.enabled }} of {{ s.mapping.entities }} enabled</span></div>
-      <div class="row"><span class="k">fingerprint</span>
-        <span class="mono">{{ s.mapping.fingerprint }}</span></div>
-      <div class="row"><span class="k">notes to review</span>
-        <span class="{{ 'warn' if s.mapping.open_todos else '' }}">
-          {{ s.mapping.notes }}{% if s.mapping.open_todos %} ({{ s.mapping.open_todos }} TODO){% endif %}
-        </span></div>
-      <div class="muted" style="margin-top:8px">
-        Order: {{ s.mapping.order | join(' → ') }}
+    <div class="sub">
+      <div class="row">
+        <span class="k">database</span>
+        <span>
+          {% if not (v3db and v3db.configured) %}<span class="pill">not configured</span>
+          {% elif v3db.ok %}<span class="pill ok">connected</span>
+          {% else %}<span class="pill bad">unreachable</span>{% endif %}
+        </span>
       </div>
-      <div class="actions"><a href="/mapping{{ q }}"><button type="button">Review mapping</button></a></div>
+      {% if v3db and v3db.configured %}
+        <div class="mono muted" style="word-break:break-all">{{ v3db.url }}</div>
+        {% if not v3db.ok %}<div class="note">{{ v3db.message }}</div>{% endif %}
+      {% else %}
+        <div class="muted">Set <span class="mono">V3_DATABASE_URL</span>, or use
+          the API below.</div>
+      {% endif %}
+    </div>
+
+    <div class="sub">
+      <h3>HTTP API {% if s.v3api.ready %}<span class="pill ok">connected</span>{% endif %}</h3>
+      <p class="muted">
+        {% if s.v3api.ready %}
+          <span class="ok">{{ s.v3api.base_url }}</span> — {{ s.v3api.describe }}
+          {% if s.v3api.age_hours is not none %} · saved {{ s.v3api.age_hours }}h ago
+            {% if s.v3api.stale %}<span class="warn">(may have expired)</span>{% endif %}
+          {% endif %}
+        {% else %}
+          Not connected — {{ s.v3api.describe }}.
+        {% endif %}
+      </p>
+
+      <details {% if not s.v3api.ready %}open{% endif %}>
+        <summary>{{ 'Reconnect' if s.v3api.ready else 'Connect' }}</summary>
+        <form method="post" action="/actions/v3-connect{{ q }}" style="margin-top:10px">
+          <label style="margin-top:0">v3 base URL</label>
+          <input type="text" name="base_url" placeholder="https://shop.eagsoftware.com"
+                 value="{{ s.v3api.base_url or '' }}" required>
+          <label>Cookie header from a signed-in v3 tab</label>
+          <input type="password" name="cookie" placeholder="name=value; other=value"
+                 autocomplete="off">
+          <div class="muted">devtools → Network → any request → copy the whole
+            Cookie header. Stored in <span class="mono">state/v3_session.json</span>
+            at mode 0600, never shown again.</div>
+          <div class="actions"><button class="primary">Save session</button></div>
+        </form>
+        {% if s.v3api.saved %}
+          <form method="post" action="/actions/v3-forget{{ q }}" class="actions">
+            <button class="danger">Delete stored session</button>
+          </form>
+        {% endif %}
+      </details>
+
+      <form method="post" action="/actions/api-get{{ q }}" style="margin-top:14px">
+        <label>Read an endpoint</label>
+        <input type="text" name="path" value="/api/V1/pricing-profiles" required>
+        <div class="muted">Pull what the mapping needs first — the UUIDs behind
+          pricing profiles, locations, payment terms and users, and the codes
+          behind v3's enums.</div>
+        <div class="actions">
+          <button {% if not s.v3api.ready %}disabled title="connect first"{% endif %}>GET</button>
+        </div>
+      </form>
+
+      <details style="margin-top:14px">
+        <summary>Send one record (creates it)</summary>
+        <form method="post" action="/actions/api-post{{ q }}" style="margin-top:10px">
+          <label style="margin-top:0">Endpoint</label>
+          <input type="text" name="path" value="/api/V1/customers" required>
+          <label>JSON body</label>
+          <textarea name="body" rows="5">{"customerName": "ZZ Migration Test"}</textarea>
+          <div class="muted">Exercises the same client and response handling a
+            real run uses, so a 200 that means “rejected” shows up here rather
+            than 400 records in. Expect the first try to fail — v3 names the
+            fields it wanted.</div>
+          <label>Type <code>write</code> to confirm</label>
+          <input type="text" name="confirm" autocomplete="off">
+          <div class="actions">
+            <button class="danger" {% if not s.v3api.ready %}disabled{% endif %}>POST</button>
+          </div>
+        </form>
+      </details>
+    </div>
+  </div>
+
+  <!-- 4 — Map v2 → v3 ---------------------------------------------------- -->
+  <div class="card" id="map">
+    <h2><span class="phase {{ 'done' if map_ready else '' }}">4</span>Map v2 → v3</h2>
+    <p class="muted">Introspect both schemas, draft a mapping, answer its TODOs.</p>
+
+    <div class="flow" style="gap:8px">
+      <form method="post" action="/actions/discover{{ q }}" style="display:flex;gap:8px;align-items:center">
+        <select name="side">
+          <option value="both">both</option><option value="v2">v2</option><option value="v3">v3</option>
+        </select>
+        <button>Discover</button>
+      </form>
+      <form method="post" action="/actions/scaffold{{ q }}">
+        <button>Scaffold draft</button>
+      </form>
+    </div>
+
+    {% if map_ready %}
+      <div class="sub">
+        <div class="row"><span class="k">entities</span>
+          <span>{{ s.mapping.enabled }} of {{ s.mapping.entities }} enabled</span></div>
+        <div class="row"><span class="k">notes to review</span>
+          <span class="{{ 'warn' if s.mapping.open_todos else '' }}">
+            {{ s.mapping.notes }}{% if s.mapping.open_todos %} ({{ s.mapping.open_todos }} TODO){% endif %}
+          </span></div>
+        <div class="muted" style="margin-top:8px">Order: {{ s.mapping.order | join(' → ') }}</div>
+        <div class="actions"><a href="/mapping{{ q }}"><button type="button">Review mapping</button></a></div>
+      </div>
     {% elif s.mapping.present %}
-      <div class="note">Mapping is invalid: {{ s.mapping.message }}</div>
+      <div class="note" style="margin-top:12px">Mapping is invalid: {{ s.mapping.message }}</div>
     {% else %}
-      <p class="muted">{{ s.mapping.message }}</p>
+      <p class="muted" style="margin-top:12px">{{ s.mapping.message }}</p>
     {% endif %}
 
     {% if s.mapping.draft %}
@@ -336,15 +413,17 @@
         <input type="hidden" name="which" value="mapping">
         <button class="primary">Promote mapping draft →</button>
       </form>
-      <div class="muted">Review <span class="mono">config/mapping.draft.yaml</span> first —
-        every guess it made carries a note.</div>
+      <div class="muted">Review <span class="mono">config/mapping.draft.yaml</span>
+        first — every guess it made carries a note.</div>
     {% endif %}
   </div>
 
-  <!-- Migrate ------------------------------------------------------------ -->
-  <div class="card">
-    <h2>Migrate</h2>
-    {% set ready = s.mapping.present and s.mapping.valid %}
+  <!-- 5 — Migrate -------------------------------------------------------- -->
+  <div class="card" id="migrate">
+    <h2><span class="phase">5</span>Migrate</h2>
+    {% if not map_ready %}
+      <p class="note">Needs a valid mapping first (phase 4).</p>
+    {% endif %}
 
     <form method="post" action="/actions/plan{{ q }}">
       <div class="step"><span class="n">1</span>
@@ -353,7 +432,7 @@
           <input type="number" name="limit" value="0" min="0" placeholder="row limit">
         </div>
       </div>
-      <div class="actions"><button {% if not ready %}disabled{% endif %}>Plan</button></div>
+      <div class="actions"><button {% if not map_ready %}disabled{% endif %}>Plan</button></div>
     </form>
 
     <form method="post" action="/actions/run{{ q }}" style="margin-top:16px">
@@ -365,7 +444,7 @@
           <input type="text" name="resume" placeholder="20260804T…">
         </div>
       </div>
-      <div class="actions"><button class="primary" {% if not ready %}disabled{% endif %}>Run migration</button></div>
+      <div class="actions"><button class="primary" {% if not map_ready %}disabled{% endif %}>Run migration</button></div>
     </form>
 
     <form method="post" action="/actions/verify{{ q }}" style="margin-top:16px">
@@ -375,27 +454,8 @@
           <input type="text" name="run_id" placeholder="run id (blank = latest)">
         </div>
       </div>
-      <div class="actions"><button {% if not ready %}disabled{% endif %}>Verify</button></div>
+      <div class="actions"><button {% if not map_ready %}disabled{% endif %}>Verify</button></div>
     </form>
-  </div>
-
-  <!-- Staging ------------------------------------------------------------ -->
-  <div class="card">
-    <h2>Staging</h2>
-    {% if s.staging.present and s.staging.tables %}
-      {% for t in s.staging.tables %}
-        <div class="row">
-          <a href="/staging?table={{ t.name }}{% if token %}&token={{ token }}{% endif %}">{{ t.name }}</a>
-          <span class="mono">{{ "{:,}".format(t.rows) }}</span>
-        </div>
-      {% endfor %}
-      <p class="muted" style="margin-top:10px">
-        Point <span class="mono">V2_DATABASE_URL</span> at
-        <span class="mono">sqlite:////app/state/staging.sqlite</span> to migrate from this.
-      </p>
-    {% else %}
-      <p class="muted">Nothing harvested yet.</p>
-    {% endif %}
   </div>
 
   <!-- Runs --------------------------------------------------------------- -->
@@ -503,7 +563,7 @@ function follow(jobId, from) {
     activeJob = null;
     setStatus(JSON.parse(e.data).status);
     stopBtn.disabled = true;
-    // Refresh the panels around the log, but leave the log itself on screen.
+    // Refresh the cards around the log, but leave the log itself on screen.
     refreshStatus();
     watch();
   });
@@ -514,9 +574,6 @@ function follow(jobId, from) {
 // without touching the log the user is reading.
 async function refreshStatus() {
   try {
-    const res = await fetch(`/api/status${qs}`);
-    if (!res.ok) return;
-    const fresh = await res.text();
     const doc = new DOMParser().parseFromString(
       await (await fetch(`/${qs}`)).text(), "text/html");
     const next = doc.querySelector(".grid");
