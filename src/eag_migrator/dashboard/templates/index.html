@@ -309,7 +309,18 @@
     </div>
 
     <div class="sub">
-      <h3>HTTP API {% if s.v3api.ready %}<span class="pill ok">connected</span>{% endif %}</h3>
+      <h3>HTTP API
+        {% if s.v3api.mock %}<span class="pill ok">rehearsal — mock</span>
+        {% elif s.v3api.ready %}<span class="pill ok">connected</span>{% endif %}</h3>
+      {% if s.v3api.mock %}
+        <div class="flash msg" style="margin:0 0 10px">
+          <strong>Rehearsal.</strong> Pointed at the local mock, not a production
+          tenant — writes go nowhere real and can be wiped.
+          <form method="post" action="/actions/mock-reset{{ q }}" class="actions">
+            <button>Reset the mock</button>
+          </form>
+        </div>
+      {% endif %}
       <p class="muted">
         {% if s.v3api.ready %}
           <span class="ok">{{ s.v3api.base_url }}</span> — {{ s.v3api.describe }}
@@ -320,6 +331,14 @@
           Not connected — {{ s.v3api.describe }}.
         {% endif %}
       </p>
+
+      <form method="post" action="/actions/v3-use-mock{{ q }}" class="actions" style="margin-bottom:4px">
+        <button {% if s.v3api.mock %}disabled title="already pointed at the mock"{% endif %}>
+          Point at the local mock (rehearse)</button>
+      </form>
+      <div class="muted" style="margin-bottom:8px">Start it first with
+        <span class="mono">make mock-v3</span>. A rehearsal runs the whole
+        pipeline without touching production.</div>
 
       <details {% if not s.v3api.ready %}open{% endif %}>
         <summary>{{ 'Reconnect' if s.v3api.ready else 'Connect' }}</summary>
@@ -438,7 +457,11 @@
     <form method="post" action="/actions/run{{ q }}" style="margin-top:16px">
       <div class="step"><span class="n">2</span>
         <div style="flex:1">
-          <label style="margin-top:0">Migrate — <strong>writes to v3</strong></label>
+          {% if s.v3api.mock %}
+            <label style="margin-top:0">Migrate — <span class="ok">writes to the mock (rehearsal)</span></label>
+          {% else %}
+            <label style="margin-top:0">Migrate — <strong>writes to v3</strong></label>
+          {% endif %}
           <input type="text" name="confirm" placeholder="type MIGRATE to confirm" autocomplete="off">
           <label>Resume a run id (optional)</label>
           <input type="text" name="resume" placeholder="20260804T…">

@@ -1218,6 +1218,56 @@ def api_post(
     _show_api_response(resp, path, f"api-post-{name}.json")
 
 
+@app.command(name="mock-v3")
+def mock_v3(
+    host: str = typer.Option("0.0.0.0", help="Bind address"),
+    port: int = typer.Option(0, help="Port (default: 19090)"),
+    strict: bool = typer.Option(
+        False, "--strict",
+        help="Reject a record missing a known-required field, like real v3 would",
+    ),
+    reset: bool = typer.Option(False, "--reset", help="Wipe stored records first"),
+) -> None:
+    """Run a local stand-in for v3's API, to rehearse a migration.
+
+    NOT v3 — a mock built from the survey, so the whole pipeline can run and
+    roll back for real without touching a production tenant. Point the migrator
+    at it with V3_API_BASE_URL and run as normal. It cannot confirm v3's exact
+    payload; `eagm api-post` against real v3 does that.
+    """
+    from .mockv3 import DEFAULT_PORT, MockConfig, reset_store, serve
+
+    _settings()
+    db_path = STATE_DIR / "mockv3.sqlite"
+    port = port or DEFAULT_PORT
+    if reset:
+        reset_store(db_path)
+        console.print("[dim]stored records wiped[/dim]")
+
+    server = serve(host, port, MockConfig(db_path=db_path, strict=strict))
+    shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    console.print(
+        f"[bold]Mock v3[/bold] — a rehearsal target, [yellow]not production[/yellow]"
+    )
+    console.print(f"  listening on http://{shown}:{port}")
+    console.print(f"  records:  http://{shown}:{port}/__mock/records")
+    console.print(f"  enums:    http://{shown}:{port}/__mock/enums")
+    console.print(f"  store:    {db_path}")
+    console.print(
+        f"  {'[bad]strict[/bad] — enforces known-required fields' if strict else 'lenient — stores anything, assigns an id'}"
+    )
+    console.print("\n[dim]Point the migrator at it, e.g. in .env:[/dim]")
+    console.print("  [bold]V3_API_BASE_URL=http://mock-v3:19090[/bold]  (compose)")
+    console.print("  [bold]V3_API_COOKIE=mock[/bold]                    (any value; the mock needs no real auth)")
+    console.print("\n[dim]Ctrl-C to stop.[/dim]")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/dim]")
+    finally:
+        server.server_close()
+
+
 @app.command()
 def dashboard(
     host: str = typer.Option("127.0.0.1", help="Bind address"),

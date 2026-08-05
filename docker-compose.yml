@@ -73,6 +73,24 @@ services:
       - "127.0.0.1:${EAGM_DASHBOARD_PORT:-19080}:19080"
     entrypoint: ["eagm", "dashboard", "--host", "0.0.0.0", "--port", "19080"]
 
+  # --- A local stand-in for v3, for rehearsing a migration -----------------
+  # NOT v3. A mock built from the survey, so the whole pipeline can run and
+  # roll back without writing to a production tenant. Opt-in:
+  #   docker compose --profile mock up -d mock-v3
+  # then point the migrator at it with V3_API_BASE_URL=http://mock-v3:19090.
+  mock-v3:
+    profiles: ["mock"]
+    build:
+      context: .
+      args:
+        WITH_BROWSER: "${WITH_BROWSER:-true}"
+    volumes:
+      - ./state:/app/state
+    working_dir: /app
+    ports:
+      - "127.0.0.1:${EAGM_MOCK_PORT:-19090}:19090"
+    entrypoint: ["eagm", "mock-v3", "--host", "0.0.0.0", "--port", "19090"]
+
   # --- EAG v2 candidates ---------------------------------------------------
   v2-mysql:
     profiles: ["v2-mysql"]

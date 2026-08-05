@@ -1004,3 +1004,31 @@ def test_harvest_is_gated_on_a_live_config(client, workspace):
 def test_migrate_is_gated_on_a_valid_mapping(client):
     page = client.get("/").text
     assert "Needs a valid mapping first" in page
+
+
+# --- rehearsing against the mock v3 -----------------------------------------
+
+
+def test_pointing_at_the_mock_is_shown_as_a_rehearsal(workspace, client, monkeypatch):
+    monkeypatch.setenv("EAGM_MOCK_URL", "http://mock-v3:19090")
+    res = client.post("/actions/v3-use-mock", follow_redirects=False)
+    assert res.status_code == 303
+
+    body = client.get("/api/status").json()
+    assert body["v3api"]["ready"] is True
+    assert body["v3api"]["mock"] is True
+
+    page = client.get("/").text
+    assert "rehearsal" in page.lower()
+    # The migrate button must not call it a production write when it isn't.
+    assert "writes to the mock" in page
+
+
+def test_reset_mock_refuses_when_v3_is_a_real_tenant(workspace, client):
+    from eag_migrator.web.session import Session
+
+    Session.from_cookie_header("s=1", "https://zephyr-glass.eagsoftware.com").save(
+        dash.V3_SESSION_FILE)
+    res = client.post("/actions/mock-reset", follow_redirects=False)
+    assert res.status_code == 303
+    assert "not+pointed+at+the+mock" in res.headers["location"]

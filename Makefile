@@ -56,6 +56,21 @@ dashboard: setup ## Start the web dashboard (EAGM_DASHBOARD_PORT, default 19080)
 	@test -n "$$EAGM_DASHBOARD_TOKEN" && \
 		echo "  token required — append ?token=$$EAGM_DASHBOARD_TOKEN" || true
 
+.PHONY: mock-v3
+mock-v3: setup ## Start the local mock v3 (rehearsal target, not production)
+	$(COMPOSE) --profile mock up -d mock-v3
+	@echo "Mock v3: http://127.0.0.1:$${EAGM_MOCK_PORT:-19090}  (records at /__mock/records)"
+	@echo "Point the migrator at it: V3_API_BASE_URL=http://mock-v3:19090 in .env"
+
+.PHONY: mock-v3-reset
+mock-v3-reset: ## Wipe everything written to the running mock v3
+	$(COMPOSE) exec mock-v3 python -c \
+		"import httpx; print(httpx.post('http://localhost:19090/__mock/reset').json())"
+
+.PHONY: mock-v3-stop
+mock-v3-stop: ## Stop the mock v3
+	$(COMPOSE) --profile mock stop mock-v3
+
 .PHONY: dashboard-logs
 dashboard-logs: ## Tail the dashboard logs
 	$(COMPOSE) logs -f dashboard

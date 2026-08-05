@@ -166,10 +166,10 @@ starts unless you ask for it:
 Set `COMPOSE_PROFILES=v2-mysql,v3-postgres` in `.env` to make `make up` do the
 right thing without repeating the flags.
 
-Local ports, all bound to `127.0.0.1`: dashboard `19080`, v2-mysql `13306`,
-v3-mysql `13307`, v2-postgres `15432`, v3-postgres `15433`, adminer `18080`.
-Override the dashboard with `EAGM_DASHBOARD_PORT` and adminer with
-`ADMINER_PORT`.
+Local ports, all bound to `127.0.0.1`: dashboard `19080`, mock v3 `19090`,
+v2-mysql `13306`, v3-mysql `13307`, v2-postgres `15432`, v3-postgres `15433`,
+adminer `18080`. Override the dashboard with `EAGM_DASHBOARD_PORT`, the mock
+with `EAGM_MOCK_PORT`, adminer with `ADMINER_PORT`.
 
 ### On Windows
 
@@ -855,6 +855,46 @@ worth doing before a real run:
 Both write the full response to `reports/`, so the enum codes and UUIDs are
 there to copy into the mapping.
 
+### Rehearsing against a local mock v3
+
+Writing to a production tenant to find out whether the mapping is right is a
+bad trade. Instead, rehearse the whole thing against a local stand-in:
+
+```bash
+make mock-v3       # a local API that behaves like v3, on :19090
+# in .env:  V3_API_BASE_URL=http://mock-v3:19090   V3_API_COOKIE=mock
+make plan && make migrate && make cli CMD="rollback <run-id>"
+```
+
+Or, from the dashboard, the **v3 API** card has a *Point at the local mock*
+button; once pointed there the page marks every write a **rehearsal**, and the
+Migrate button says so.
+
+It is **not v3** and never claims to be — a mock built from the survey. It
+serves the same `/api/V1` routes, the same `{data, messages, succeeded}`
+envelope, UUID `key`s, `CUST-000N` ids, and the reference data (pricing
+profiles, locations, payment terms, users) the mapping points at, with fixed
+synthetic UUIDs so a `const:` in the mapping is reproducible. Records land in
+`state/mockv3.sqlite`; read them at `/__mock/records`, the enum codes at
+`/__mock/enums`, wipe them with `make mock-v3-reset`.
+
+What a rehearsal proves, and what it can't:
+
+- It **does** exercise the mechanics — that the mapping produces the required
+  fields, that ids come back and a job resolves its customer against the id
+  the mock just assigned, that a rollback deletes exactly what a run wrote. It
+  even reproduces v3's nastiest trap: a rejected write arriving as HTTP 200
+  with `succeeded: false`.
+- It **can't** know v3's real field names or full validation — only what the
+  survey found. So `--strict` enforces the fields we're confident are required
+  (and rejects an unknown enum code either way), but the exact payload still
+  gets confirmed once against real v3 with `api-post`. A mock cannot reject a
+  field nobody told it about.
+
+The honest sequence: rehearse the full pipeline against the mock until it is
+clean, confirm the real payload with one `api-post` to production, reconcile
+any difference, then run for real.
+
 ---
 
 ## Commands
@@ -862,6 +902,7 @@ there to copy into the mapping.
 | Command | Purpose |
 |---|---|
 | `eagm dashboard` | Serve the web dashboard (localhost:19080) |
+| `eagm mock-v3` | Serve a local stand-in for v3, to rehearse a migration |
 | `eagm doctor` | Check both connections and show where state and config live |
 | `eagm login <url>` | Store an authenticated session for the v2 app |
 | `eagm recon <url>` | Inspect the live v2 site; detect a login wall |
@@ -897,7 +938,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-232 tests, in seven groups:
+243 tests, in eight groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -939,6 +980,11 @@ make test-local    # on the host
   passwords are stripped, that a migration cannot start without its confirmation word, that
   a crafted URL cannot read outside `reports/`, that the token gate holds, and
   that a stopped run stays resumable.
+- **Writing to v3** — the API sink against a fake API that answers with v3's
+  envelope, including a rejection arriving as HTTP 200; and a full run through
+  the mock v3 over a live socket — insert, capture the assigned UUID, a
+  dependent record resolving that id, and a rollback that deletes exactly what
+  the run wrote.
 
 The database tests run on SQLite so no containers are needed, but the engine is
 dialect-agnostic — all database access goes through SQLAlchemy.
@@ -961,6 +1007,8 @@ reports/jobs/              per-run job logs, written live (gitignored)
 db/v2-seed/, db/v3-seed/   drop .sql dumps here (gitignored)
 src/eag_migrator/
   dashboard/               the web UI (FastAPI + server-rendered templates)
+  mockv3/                  a local stand-in for v3's API, for rehearsals
+  v3_api.py                v3 API credentials (token or session cookie)
   discovery.py             schema introspection and fingerprinting
   scaffold.py              draft-mapping generator
   mapping.py               the mapping schema

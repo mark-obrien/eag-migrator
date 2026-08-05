@@ -85,6 +85,11 @@ switch ($Task) {
         Write-Host "    api-get <path>   read an endpoint (UUIDs, enum codes)"
         Write-Host "    api-post <path>  send one record and report what came back"
         Write-Host ""
+        Write-Host "  Rehearsing (no production writes)"
+        Write-Host "    mock-v3          start a local stand-in for v3"
+        Write-Host "    mock-v3-reset    wipe what the mock has stored"
+        Write-Host "    mock-v3-stop     stop it"
+        Write-Host ""
         Write-Host "  Migrating"
         Write-Host "    doctor           check both database connections"
         Write-Host "    discover         introspect both schemas"
@@ -124,6 +129,18 @@ switch ($Task) {
     }
     "dashboard-logs" { Invoke-Compose @("logs", "-f", "dashboard") }
     "dashboard-stop" { Invoke-Compose @("stop", "dashboard") }
+
+    "mock-v3" {
+        Initialize-Env
+        Invoke-Compose @("--profile", "mock", "up", "-d", "mock-v3")
+        Write-Host "Mock v3 (rehearsal target): http://127.0.0.1:19090"
+        Write-Host "Point the migrator at it: V3_API_BASE_URL=http://mock-v3:19090 in .env"
+    }
+    "mock-v3-reset" {
+        Invoke-Compose @("exec", "mock-v3", "python", "-c",
+            "import httpx; print(httpx.post('http://localhost:19090/__mock/reset').json())")
+    }
+    "mock-v3-stop" { Invoke-Compose @("--profile", "mock", "stop", "mock-v3") }
 
     "recon"   { Require-Argument "a URL"; Invoke-Eagm (@("recon") + $Rest) }
     "capture"    { Require-Argument "a URL"; Invoke-Eagm (@("capture") + $Rest) }

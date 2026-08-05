@@ -235,11 +235,16 @@ def _harvest_status() -> dict[str, Any]:
 
 def _v3_api_status(settings: Any) -> dict[str, Any]:
     from .. import v3_api
+    from ..mockv3 import is_mock_url
 
     try:
-        return v3_api.status(settings, V3_SESSION_FILE)
+        state = v3_api.status(settings, V3_SESSION_FILE)
     except Exception as exc:  # noqa: BLE001 - never take the page down for this
-        return {"ready": False, "describe": f"{type(exc).__name__}: {exc}"}
+        return {"ready": False, "describe": f"{type(exc).__name__}: {exc}", "mock": False}
+    # A migration pointed at the mock is a rehearsal, not a production write —
+    # the UI needs to say so plainly and drop the warnings.
+    state["mock"] = is_mock_url(state.get("base_url"))
+    return state
 
 
 def _config_choices() -> list[dict[str, Any]]:
@@ -682,6 +687,32 @@ def create_app() -> FastAPI:
 
         gone = v3_api.forget(V3_SESSION_FILE)
         return _back(request, message="v3 session deleted" if gone else "nothing stored")
+
+    @app.post("/actions/v3-use-mock", dependencies=[Depends(require_token)])
+    def action_v3_use_mock(request: Request) -> Any:
+        """Point v3 at the local mock, so writes are a rehearsal not production."""
+        from .. import v3_api
+
+        url = os.getenv("EAGM_MOCK_URL", "http://mock-v3:19090")
+        # The mock needs no real auth; a placeholder cookie just marks it ready.
+        v3_api.save_cookie(url, "mock=1", V3_SESSION_FILE)
+        return _back(request, message=f"v3 pointed at the mock ({url}) — writes are a rehearsal")
+
+    @app.post("/actions/mock-reset", dependencies=[Depends(require_token)])
+    def action_mock_reset(request: Request) -> Any:
+        import httpx
+
+        from .. import v3_api
+        from ..mockv3 import is_mock_url
+
+        creds = v3_api.load_credentials(load_settings(), V3_SESSION_FILE)
+        if not is_mock_url(creds.base_url):
+            return _back(request, error="v3 is not pointed at the mock")
+        try:
+            httpx.post(creds.base_url.rstrip("/") + "/__mock/reset", timeout=10)
+        except Exception as exc:  # noqa: BLE001
+            return _back(request, error=f"could not reach the mock: {exc}")
+        return _back(request, message="mock records wiped")
 
     @app.post("/actions/api-get", dependencies=[Depends(require_token)])
     def action_api_get(request: Request, path: str = Form(...)) -> Any:
