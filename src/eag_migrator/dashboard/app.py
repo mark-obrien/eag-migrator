@@ -336,6 +336,9 @@ def build_status() -> dict[str, Any]:
         "api_sink": bool(settings.v3_api_base_url),
         "v3api": _v3_api_status(settings),
         "configs": _config_choices(),
+        # The dashboard reaches the mock as mock-v3:19090 (compose network),
+        # but a browser link has to be the host-published port.
+        "mock_browse_url": f"http://localhost:{os.getenv('EAGM_MOCK_PORT', '19090')}/view",
         "browser": browser_state(),
         # Never the key itself, only whether there is one.
         "assist": {"available": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip())},

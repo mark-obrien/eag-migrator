@@ -874,6 +874,23 @@ live in v2. But those reference ids are exactly what the mapping's foreign
 keys must point at, so having v3's real ones locally is what lets the mock
 below rehearse against production's actual values rather than stand-ins.
 
+### Checking the data in a browser
+
+After a rehearsal run, open the mock in a browser to click through what
+landed, laid out like v3's screens — Customers and Jobs tabs, list to detail,
+plus the reference tables:
+
+```
+http://localhost:19090/view
+```
+
+Every page carries a standing banner — *rehearsal data, not the real system* —
+because it is an inspection view of your own migrated records, not a copy of
+v3 to be mistaken for the real thing. The dashboard's rehearsal note links
+straight to it. It shows what the migration *wrote*, so it is where you
+confirm names came across whole, a job resolved to the right customer, and the
+enums look sane before trusting the mapping.
+
 ### Rehearsing against a local mock v3
 
 Writing to a production tenant to find out whether the mapping is right is a
@@ -964,7 +981,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-247 tests, in eight groups:
+250 tests, in eight groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -1010,8 +1027,9 @@ make test-local    # on the host
   envelope, including a rejection arriving as HTTP 200; a full run through the
   mock v3 over a live socket — insert, capture the assigned UUID, a dependent
   record resolving that id, and a rollback that deletes exactly what the run
-  wrote; and the read-only snapshot, pulling reference data and paged records,
-  with the mock then serving those real ids in place of its synthetic seed.
+  wrote; the read-only snapshot, pulling reference data and paged records, with
+  the mock then serving those real ids in place of its synthetic seed; and the
+  browsable views showing migrated records, each marked a rehearsal.
 
 The database tests run on SQLite so no containers are needed, but the engine is
 dialect-agnostic — all database access goes through SQLAlchemy.

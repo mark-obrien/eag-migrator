@@ -8,6 +8,7 @@ Records land in a SQLite file you can inspect or throw away.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import json
 import re
 import sqlite3
@@ -156,7 +157,13 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if path in ("", "/"):
-            self._send(_LANDING, ctype="text/html; charset=utf-8")
+            self._send(self._render_index(), ctype="text/html; charset=utf-8")
+            return
+
+        # The browsable data views: check what a rehearsal migration wrote,
+        # laid out like v3's screens but marked a rehearsal on every page.
+        if path == "/view" or path.startswith("/view/"):
+            self._send(self._render_view(parsed.path), ctype="text/html; charset=utf-8")
             return
 
         # (snapshot key, synthetic fallback) per reference route. When a
@@ -315,21 +322,206 @@ class Handler(BaseHTTPRequestHandler):
         conn.close()
         return json.loads(row["payload"]) if row else None
 
+    # --- browsable views ----------------------------------------------------
 
-_LANDING = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Mock v3 — rehearsal target</title>
-<style>body{font:16px/1.6 system-ui;margin:8vh auto;max-width:640px;padding:0 20px;
-color:#16191f}code{background:#eef;padding:1px 5px;border-radius:4px}
-.b{background:#fffbe6;border:1px solid #f0c000;border-radius:8px;padding:14px 18px}</style>
-</head><body>
-<h1>Mock v3 &mdash; rehearsal target</h1>
-<div class="b"><strong>This is not the real v3.</strong> It is a local
-stand-in built from the survey, for rehearsing a migration without writing to
-a production tenant. Records here are disposable.</div>
-<p>Point the migrator at it with
-<code>V3_API_BASE_URL=http://mock-v3:19090</code> (in compose) and run as
-normal. Inspect what landed at <code>/__mock/records</code>, the enum codes at
-<code>/__mock/enums</code>, and wipe it with <code>eagm mock-v3 --reset</code>.</p>
+    def _entities(self) -> list[str]:
+        conn = _connect(self.cfg.db_path)
+        found = {r["entity"] for r in conn.execute("SELECT DISTINCT entity FROM records")}
+        conn.close()
+        found.add("customers")  # always offer it, even before anything is written
+        return sorted(found)
+
+    def _reference(self) -> dict[str, list]:
+        snap = getattr(self.server, "snapshot", None) or {}
+        return {
+            "pricing_profiles": snap.get("pricing_profiles", seed.PRICING_PROFILES),
+            "locations": snap.get("locations", seed.LOCATIONS),
+            "payment_terms": snap.get("payment_terms", seed.PAYMENT_TERMS),
+            "users": snap.get("users", seed.USERS),
+        }
+
+    def _render_index(self) -> str:
+        entities = self._entities()
+        conn = _connect(self.cfg.db_path)
+        counts = {
+            e: conn.execute("SELECT COUNT(*) c FROM records WHERE entity = ?", (e,)).fetchone()["c"]
+            for e in entities
+        }
+        conn.close()
+        counts["customers"] = counts.get("customers", 0) + 1  # the seed
+        rows = "".join(
+            f'<li><a href="/view/{html.escape(e)}">{html.escape(e)}</a>'
+            f' <span class="dim">{counts[e]}</span></li>'
+            for e in entities
+        )
+        body = (
+            "<p>A local stand-in for v3, for rehearsing a migration. Records here "
+            "were written by a rehearsal run and are disposable.</p>"
+            f"<h2>What has landed</h2><ul class='big'>{rows}"
+            "<li><a href='/view/reference'>reference data</a> "
+            "<span class='dim'>config</span></li></ul>"
+            "<p class='dim'>Point the migrator at <code>http://mock-v3:19090</code> "
+            "(compose), run a migration, then refresh this to check what it wrote.</p>"
+        )
+        return _page("Overview", body, active="")
+
+    def _render_view(self, raw_path: str) -> str:
+        parts = [p for p in raw_path[len("/view"):].split("/") if p]
+        if not parts:
+            return self._render_index()
+        entity = parts[0]
+
+        if entity == "reference":
+            return self._render_reference()
+        if len(parts) >= 2:
+            return self._render_detail(entity, parts[1])
+        return self._render_list(entity)
+
+    def _render_list(self, entity: str) -> str:
+        records = self._stored(entity)
+        if not records:
+            return _page(
+                entity,
+                f"<p class='dim'>No {html.escape(entity)} yet. Run a migration "
+                f"pointed at this mock and they will appear here.</p>",
+                active=entity, entities=self._entities(),
+            )
+
+        columns = _list_columns(records)
+        head = "".join(f"<th>{html.escape(c)}</th>" for c in columns) + "<th></th>"
+        body_rows = []
+        for rec in records:
+            cells = "".join(f"<td>{_cell(rec.get(c))}</td>" for c in columns)
+            key = rec.get("key")
+            link = (f'<a href="/view/{html.escape(entity)}/{html.escape(str(key))}">open</a>'
+                    if key else '<span class="dim">seed</span>')
+            body_rows.append(f"<tr>{cells}<td>{link}</td></tr>")
+        table = (
+            f"<div class='scroll'><table><thead><tr>{head}</tr></thead>"
+            f"<tbody>{''.join(body_rows)}</tbody></table></div>"
+            f"<p class='dim'>{len(records)} record(s).</p>"
+        )
+        return _page(entity, table, active=entity, entities=self._entities())
+
+    def _render_detail(self, entity: str, key: str) -> str:
+        record = None
+        for rec in self._stored(entity):
+            if str(rec.get("key")) == key:
+                record = rec
+                break
+        if record is None:
+            return _page(entity, "<p class='dim'>No such record.</p>",
+                         active=entity, entities=self._entities())
+        rows = "".join(
+            f"<tr><td class='k'>{html.escape(str(k))}</td><td>{_cell(v)}</td></tr>"
+            for k, v in record.items()
+        )
+        body = (
+            f"<p><a href='/view/{html.escape(entity)}'>&larr; {html.escape(entity)}</a></p>"
+            f"<table class='detail'><tbody>{rows}</tbody></table>"
+        )
+        return _page(f"{entity} record", body, active=entity, entities=self._entities())
+
+    def _render_reference(self) -> str:
+        snap = getattr(self.server, "snapshot", None)
+        source = ("v3's real ids, from a snapshot" if snap
+                  else "synthetic seed — run <code>eagm v3-snapshot</code> for real ids")
+        blocks = [f"<p class='dim'>Reference data: {source}.</p>"]
+        for name, rows in self._reference().items():
+            if not rows:
+                continue
+            columns = _list_columns(rows)
+            head = "".join(f"<th>{html.escape(c)}</th>" for c in columns)
+            body_rows = "".join(
+                "<tr>" + "".join(f"<td>{_cell(r.get(c))}</td>" for c in columns) + "</tr>"
+                for r in rows
+            )
+            blocks.append(
+                f"<h2>{html.escape(name)}</h2><div class='scroll'><table><thead><tr>"
+                f"{head}</tr></thead><tbody>{body_rows}</tbody></table></div>"
+            )
+        return _page("reference", "".join(blocks), active="reference",
+                     entities=self._entities())
+
+
+# Which columns to show in a list view, when a record has many. Everything is
+# always on the detail page; this just keeps the table readable.
+_LIST_PREFERRED = (
+    "customerId", "customerName", "name", "full_name", "first_name", "last_name",
+    "email", "phone", "status", "customerType", "paymentTerms", "profileName",
+    "termsCode", "code", "job_id", "vehicle_vin", "order_num",
+)
+_LIST_MAX_COLUMNS = 6
+
+
+def _list_columns(records: list[dict]) -> list[str]:
+    present: list[str] = []
+    seen: set[str] = set()
+    for rec in records:
+        for k in rec:
+            if k not in seen:
+                seen.add(k)
+                present.append(k)
+    ordered = [c for c in _LIST_PREFERRED if c in seen]
+    ordered += [c for c in present if c not in _LIST_PREFERRED and c != "key"]
+    return ordered[:_LIST_MAX_COLUMNS] or ["key"]
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return "<span class='dim'>—</span>"
+    if isinstance(value, (dict, list)):
+        return f"<span class='mono'>{html.escape(json.dumps(value)[:120])}</span>"
+    return html.escape(str(value))
+
+
+def _page(title: str, body: str, *, active: str, entities: list[str] | None = None) -> str:
+    tabs = ""
+    for name in entities or []:
+        cls = " class='on'" if name == active else ""
+        tabs += f"<a href='/view/{html.escape(name)}'{cls}>{html.escape(name)}</a>"
+    if entities is not None:
+        cls = " class='on'" if active == "reference" else ""
+        tabs += f"<a href='/view/reference'{cls}>reference</a>"
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)} — Mock v3</title>
+<style>
+ :root {{ color-scheme: light dark; }}
+ * {{ box-sizing: border-box; }}
+ body {{ margin:0; font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+   background:#f6f7f9; color:#16191f; }}
+ @media (prefers-color-scheme: dark) {{ body {{ background:#0f1115; color:#e6e8ec; }}
+   .card {{ background:#171a21 !important; border-color:#2a2f3a !important; }}
+   th {{ color:#9aa3b2 !important; }} td,th {{ border-color:#2a2f3a !important; }}
+   a {{ color:#6ea8fe; }} code,.mono {{ background:#1d212a !important; }} }}
+ .banner {{ background:#fffbe6; color:#7a5b00; border-bottom:1px solid #f0c000;
+   padding:8px 20px; font-size:13.5px; font-weight:600; text-align:center; }}
+ header {{ padding:14px 20px 0; }}
+ header h1 {{ font-size:16px; margin:0 0 10px; }}
+ nav {{ display:flex; gap:4px; flex-wrap:wrap; border-bottom:1px solid #d9dee7; }}
+ nav a {{ padding:7px 13px; text-decoration:none; color:#5b6472; font-size:14px;
+   border-bottom:2px solid transparent; text-transform:capitalize; }}
+ nav a.on {{ color:inherit; border-bottom-color:#1f5fd0; font-weight:600; }}
+ main {{ max-width:1100px; margin:0 auto; padding:20px; }}
+ h2 {{ font-size:14px; text-transform:uppercase; letter-spacing:.5px; color:#5b6472;
+   margin:22px 0 8px; }}
+ table {{ width:100%; border-collapse:collapse; font-size:13.5px; }}
+ th,td {{ text-align:left; padding:7px 10px; border-bottom:1px solid #e3e7ee;
+   vertical-align:top; }}
+ th {{ color:#5b6472; font-size:12px; text-transform:uppercase; letter-spacing:.4px; }}
+ td.k {{ color:#5b6472; white-space:nowrap; }}
+ table.detail td {{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; }}
+ .scroll {{ overflow-x:auto; }}
+ .dim {{ color:#9aa3b2; }}
+ code,.mono {{ background:#eef1f6; padding:1px 5px; border-radius:4px;
+   font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; }}
+ ul.big {{ list-style:none; padding:0; }} ul.big li {{ padding:6px 0; font-size:16px; }}
+</style></head><body>
+<div class="banner">Mock v3 — rehearsal data, not the real system</div>
+<header><h1>Mock v3</h1><nav>{tabs}</nav></header>
+<main>{body}</main>
 </body></html>"""
 
 

@@ -316,6 +316,10 @@
         <div class="flash msg" style="margin:0 0 10px">
           <strong>Rehearsal.</strong> Pointed at the local mock, not a production
           tenant — writes go nowhere real and can be wiped.
+          <div style="margin-top:6px">
+            <a href="{{ s.mock_browse_url }}" target="_blank" rel="noopener">Browse
+              what landed →</a>
+          </div>
           <form method="post" action="/actions/mock-reset{{ q }}" class="actions">
             <button>Reset the mock</button>
           </form>

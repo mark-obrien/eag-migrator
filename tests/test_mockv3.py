@@ -67,7 +67,7 @@ def test_the_reference_endpoints_answer_like_v3(mock):
 
 def test_the_landing_page_says_it_is_not_production(mock):
     page = httpx.get(mock + "/").text
-    assert "not the real v3" in page.lower() or "not production" in page.lower()
+    assert "not the real system" in page.lower()
 
 
 # --- a migration writes and rolls back -------------------------------------
@@ -265,3 +265,41 @@ def test_without_a_snapshot_the_mock_serves_the_synthetic_seed(mock):
 
     pp = httpx.get(mock + "/api/V1/pricing-profiles").json()["data"]
     assert pp == seed.PRICING_PROFILES
+
+
+# --- browsable views: checking the migrated data ----------------------------
+
+
+def test_the_views_show_migrated_records_and_stay_marked_a_rehearsal(mock):
+    sink = ApiSink(mock)
+    [dana, _sam] = sink.write_batch(_entity(), [
+        (1, {"customerName": "Dana Reyes", "customerType": 9, "email": "dana@example.com"}),
+        (2, {"customerName": "Sam Oyelaran", "customerType": 9}),
+    ])
+    sink.close()
+
+    listing = httpx.get(mock + "/view/customers").text
+    assert "Dana Reyes" in listing and "Sam Oyelaran" in listing
+    # Every view carries the banner, so it can never be mistaken for real v3.
+    assert "not the real system" in listing
+
+    detail = httpx.get(mock + f"/view/customers/{dana.target_id}").text
+    assert "dana@example.com" in detail
+    assert "not the real system" in detail
+
+    # The overview links to whatever entities exist.
+    index = httpx.get(mock + "/").text
+    assert "/view/customers" in index
+
+
+def test_the_reference_view_shows_the_ids_the_mapping_points_at(mock):
+    page = httpx.get(mock + "/view/reference").text
+    assert "Default" in page                       # the pricing profile / location
+    assert "NET30" in page                         # a payment term
+    assert "synthetic seed" in page                # honest about the source
+
+
+def test_an_empty_entity_view_says_so_rather_than_erroring(mock):
+    page = httpx.get(mock + "/view/jobs")
+    assert page.status_code == 200
+    assert "No jobs yet" in page.text
