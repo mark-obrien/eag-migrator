@@ -361,12 +361,31 @@
         {% endif %}
       </details>
 
+      <form method="post" action="/actions/v3-snapshot{{ q }}" style="margin-top:14px">
+        <label>Snapshot v3 — read it all into local files to analyze</label>
+        <div class="muted">Read-only. Pulls the reference tables (real UUIDs and
+          enum codes) plus any customers and jobs to
+          <span class="mono">reports/v3-snapshot/</span>, and lets the mock
+          serve v3's real ids so a rehearsal matches production.</div>
+        <div class="actions">
+          <button {% if not s.v3api.ready or s.v3api.mock %}disabled
+            title="{% if s.v3api.mock %}pointed at the mock — connect to real v3 to snapshot it{% else %}connect first{% endif %}"{% endif %}>
+            Snapshot v3</button>
+        </div>
+      </form>
+      {% if s.v3api.snapshot %}
+        <h3>What is in v3</h3>
+        {% for name, n in (s.v3api.snapshot_counts or {}).items() %}
+          <div class="row"><span>{{ name }}</span><span class="mono">{{ n }}</span></div>
+        {% endfor %}
+        <div class="muted">Full data under <span class="mono">reports/v3-snapshot/</span>.
+          <a href="/reports{{ q }}">open reports →</a></div>
+      {% endif %}
+
       <form method="post" action="/actions/api-get{{ q }}" style="margin-top:14px">
-        <label>Read an endpoint</label>
+        <label>Or read one endpoint</label>
         <input type="text" name="path" value="/api/V1/pricing-profiles" required>
-        <div class="muted">Pull what the mapping needs first — the UUIDs behind
-          pricing profiles, locations, payment terms and users, and the codes
-          behind v3's enums.</div>
+        <div class="muted">A single endpoint, e.g. to re-check one reference table.</div>
         <div class="actions">
           <button {% if not s.v3api.ready %}disabled title="connect first"{% endif %}>GET</button>
         </div>

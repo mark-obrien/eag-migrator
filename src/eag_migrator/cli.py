@@ -1218,6 +1218,39 @@ def api_post(
     _show_api_response(resp, path, f"api-post-{name}.json")
 
 
+@app.command(name="v3-snapshot")
+def v3_snapshot_cmd() -> None:
+    """Read v3 as it is, into local files you can analyze. Read-only.
+
+    Pulls the reference tables (pricing profiles, locations, payment terms,
+    users) with their real UUIDs and codes, plus any customers and jobs, to
+    reports/v3-snapshot/. Also writes state/v3_snapshot.json so the local mock
+    serves v3's real ids — making a rehearsal match production.
+    """
+    settings = _settings()
+    from . import v3_snapshot
+
+    client = _api_client(settings)
+    console.print("[bold]Snapshotting v3[/bold] (read-only)")
+    try:
+        result = v3_snapshot.snapshot(client, say=lambda m: console.print(f"  {m}"))
+    finally:
+        client.close()
+
+    counts = v3_snapshot.save(result, REPORTS_DIR, STATE_DIR / "v3_snapshot.json")
+    keys = v3_snapshot.field_keys(result)
+
+    table = Table(title="v3 contents", header_style="bold")
+    table.add_column("Collection")
+    table.add_column("Records", justify="right")
+    table.add_column("Fields", overflow="fold")
+    for name in counts:
+        table.add_row(name, str(counts[name]), ", ".join(keys.get(name, []))[:80])
+    console.print(table)
+    console.print(f"\n[dim]per-endpoint JSON: {REPORTS_DIR / 'v3-snapshot'}[/dim]")
+    console.print("[dim]the mock now serves v3's real reference ids.[/dim]")
+
+
 @app.command(name="mock-v3")
 def mock_v3(
     host: str = typer.Option("0.0.0.0", help="Bind address"),
@@ -1239,12 +1272,17 @@ def mock_v3(
 
     _settings()
     db_path = STATE_DIR / "mockv3.sqlite"
+    snapshot_path = STATE_DIR / "v3_snapshot.json"
     port = port or DEFAULT_PORT
     if reset:
         reset_store(db_path)
         console.print("[dim]stored records wiped[/dim]")
 
-    server = serve(host, port, MockConfig(db_path=db_path, strict=strict))
+    server = serve(
+        host, port,
+        MockConfig(db_path=db_path, strict=strict, snapshot_path=snapshot_path),
+    )
+    using_real = server.snapshot is not None
     shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
     console.print(
         f"[bold]Mock v3[/bold] — a rehearsal target, [yellow]not production[/yellow]"
@@ -1256,6 +1294,13 @@ def mock_v3(
     console.print(
         f"  {'[bad]strict[/bad] — enforces known-required fields' if strict else 'lenient — stores anything, assigns an id'}"
     )
+    if using_real:
+        console.print("  [green]reference data: v3's real ids, from a snapshot[/green]")
+    else:
+        console.print(
+            "  [yellow]reference data: synthetic seed[/yellow] — run "
+            "`eagm v3-snapshot` for v3's real ids"
+        )
     console.print("\n[dim]Point the migrator at it, e.g. in .env:[/dim]")
     console.print("  [bold]V3_API_BASE_URL=http://mock-v3:19090[/bold]  (compose)")
     console.print("  [bold]V3_API_COOKIE=mock[/bold]                    (any value; the mock needs no real auth)")

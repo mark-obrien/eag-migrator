@@ -56,6 +56,10 @@ dashboard: setup ## Start the web dashboard (EAGM_DASHBOARD_PORT, default 19080)
 	@test -n "$$EAGM_DASHBOARD_TOKEN" && \
 		echo "  token required — append ?token=$$EAGM_DASHBOARD_TOKEN" || true
 
+.PHONY: v3-snapshot
+v3-snapshot: ## Read v3 into reports/v3-snapshot/ to analyze (read-only)
+	$(RUN) v3-snapshot
+
 .PHONY: mock-v3
 mock-v3: setup ## Start the local mock v3 (rehearsal target, not production)
 	$(COMPOSE) --profile mock up -d mock-v3

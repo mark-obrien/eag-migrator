@@ -41,6 +41,10 @@ class MockConfig:
     db_path: Path
     strict: bool = False
     required: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_REQUIRED))
+    snapshot_path: Path | None = None
+    """A `state/v3_snapshot.json` from `eagm v3-snapshot`. When present, the
+    reference endpoints serve v3's real ids instead of the synthetic seed, so a
+    rehearsal validates the exact ids a production run will use."""
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -155,16 +159,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_LANDING, ctype="text/html; charset=utf-8")
             return
 
+        # (snapshot key, synthetic fallback) per reference route. When a
+        # snapshot exists, its real data wins.
         references = {
-            "/api/v1/pricing-profiles": seed.PRICING_PROFILES,
-            "/api/v1/locations/names": seed.LOCATIONS,
-            "/api/v1/customers/paymentterms": seed.PAYMENT_TERMS,
-            "/api/v1/identity/users": seed.USERS,
-            "/api/v1/identity/users/installers": seed.INSTALLERS,
-            "/api/v1/identity/profile": {"name": "Owner", "tenant": "rehearsal"},
+            "/api/v1/pricing-profiles": ("pricing_profiles", seed.PRICING_PROFILES),
+            "/api/v1/locations/names": ("locations", seed.LOCATIONS),
+            "/api/v1/customers/paymentterms": ("payment_terms", seed.PAYMENT_TERMS),
+            "/api/v1/identity/users": ("users", seed.USERS),
+            "/api/v1/identity/users/installers": ("installers", seed.INSTALLERS),
         }
         if path in references:
-            self._envelope(references[path])
+            key, fallback = references[path]
+            snap = getattr(self.server, "snapshot", None) or {}
+            self._envelope(snap.get(key) if key in snap else fallback)
+            return
+        if path == "/api/v1/identity/profile":
+            self._envelope({"name": "Owner", "tenant": "rehearsal"})
             return
 
         # A rehearsal aid, honestly namespaced so it cannot be mistaken for a
@@ -323,8 +333,20 @@ normal. Inspect what landed at <code>/__mock/records</code>, the enum codes at
 </body></html>"""
 
 
+def _load_snapshot(path: Path | None) -> dict | None:
+    if not path or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def serve(host: str, port: int, cfg: MockConfig) -> ThreadingHTTPServer:
     """A configured, not-yet-serving server. Call serve_forever() on it."""
     server = ThreadingHTTPServer((host, port), Handler)
     server.cfg = cfg  # type: ignore[attr-defined]
+    # Read the snapshot once at startup, so reference GETs serve real ids.
+    server.snapshot = _load_snapshot(cfg.snapshot_path)  # type: ignore[attr-defined]
     return server

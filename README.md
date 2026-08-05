@@ -855,16 +855,41 @@ worth doing before a real run:
 Both write the full response to `reports/`, so the enum codes and UUIDs are
 there to copy into the mapping.
 
+### Snapshotting v3 to analyze it
+
+```bash
+make v3-snapshot         # reads v3 read-only into reports/v3-snapshot/
+```
+
+Pulls v3 as it actually is — the reference tables (pricing profiles,
+locations, payment terms, users) with their **real UUIDs and enum codes**,
+plus any customers and jobs — into `reports/v3-snapshot/*.json` to look
+through, and prints a table of what is there and each collection's fields.
+Every request is a GET (or a search that only returns a list), so it never
+changes the tenant. The dashboard's **v3 API** card has the same as a
+*Snapshot v3* button, with a "what is in v3" readout.
+
+A fresh tenant is mostly reference and config data — the records to migrate
+live in v2. But those reference ids are exactly what the mapping's foreign
+keys must point at, so having v3's real ones locally is what lets the mock
+below rehearse against production's actual values rather than stand-ins.
+
 ### Rehearsing against a local mock v3
 
 Writing to a production tenant to find out whether the mapping is right is a
 bad trade. Instead, rehearse the whole thing against a local stand-in:
 
 ```bash
+make v3-snapshot   # first, so the mock serves v3's real reference ids
 make mock-v3       # a local API that behaves like v3, on :19090
 # in .env:  V3_API_BASE_URL=http://mock-v3:19090   V3_API_COOKIE=mock
 make plan && make migrate && make cli CMD="rollback <run-id>"
 ```
+
+With a snapshot in hand the mock serves v3's **real** pricing-profile,
+location and payment-term ids, so the foreign keys the mapping produces are
+the ones production expects. Without one it falls back to synthetic seed ids
+and says so.
 
 Or, from the dashboard, the **v3 API** card has a *Point at the local mock*
 button; once pointed there the page marks every write a **rehearsal**, and the
@@ -902,6 +927,7 @@ any difference, then run for real.
 | Command | Purpose |
 |---|---|
 | `eagm dashboard` | Serve the web dashboard (localhost:19080) |
+| `eagm v3-snapshot` | Read v3 read-only into reports/v3-snapshot/ to analyze |
 | `eagm mock-v3` | Serve a local stand-in for v3, to rehearse a migration |
 | `eagm doctor` | Check both connections and show where state and config live |
 | `eagm login <url>` | Store an authenticated session for the v2 app |
@@ -938,7 +964,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-243 tests, in eight groups:
+247 tests, in eight groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -981,10 +1007,11 @@ make test-local    # on the host
   a crafted URL cannot read outside `reports/`, that the token gate holds, and
   that a stopped run stays resumable.
 - **Writing to v3** — the API sink against a fake API that answers with v3's
-  envelope, including a rejection arriving as HTTP 200; and a full run through
-  the mock v3 over a live socket — insert, capture the assigned UUID, a
-  dependent record resolving that id, and a rollback that deletes exactly what
-  the run wrote.
+  envelope, including a rejection arriving as HTTP 200; a full run through the
+  mock v3 over a live socket — insert, capture the assigned UUID, a dependent
+  record resolving that id, and a rollback that deletes exactly what the run
+  wrote; and the read-only snapshot, pulling reference data and paged records,
+  with the mock then serving those real ids in place of its synthetic seed.
 
 The database tests run on SQLite so no containers are needed, but the engine is
 dialect-agnostic — all database access goes through SQLAlchemy.
@@ -1008,6 +1035,7 @@ db/v2-seed/, db/v3-seed/   drop .sql dumps here (gitignored)
 src/eag_migrator/
   dashboard/               the web UI (FastAPI + server-rendered templates)
   mockv3/                  a local stand-in for v3's API, for rehearsals
+  v3_snapshot.py           read v3 read-only into local files to analyze
   v3_api.py                v3 API credentials (token or session cookie)
   discovery.py             schema introspection and fingerprinting
   scaffold.py              draft-mapping generator

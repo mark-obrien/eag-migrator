@@ -180,3 +180,88 @@ def test_is_mock_url_recognises_the_local_stand_in():
     assert not is_mock_url("https://zephyr-glass.eagsoftware.com")
     assert not is_mock_url("http://localhost:8000")   # some other local server
     assert not is_mock_url(None)
+
+
+# --- snapshotting v3 into local files ---------------------------------------
+#
+# The snapshot is the "give me the real v3 data to analyze" path. It reads
+# read-only and, because it uses the same client/envelope handling, it can be
+# tested by pointing it at the mock — which speaks v3's dialect.
+
+
+def test_snapshot_pulls_reference_data_and_records(mock, tmp_path):
+    from eag_migrator import v3_snapshot
+
+    # Put a couple of customers in the mock so the paged pull has something.
+    sink = ApiSink(mock)
+    sink.write_batch(_entity(), [(1, {"customerName": "Dana", "customerType": 9}),
+                                 (2, {"customerName": "Sam", "customerType": 9})])
+    sink.close()
+
+    client = httpx.Client(base_url=mock)
+    try:
+        result = v3_snapshot.snapshot(client)
+    finally:
+        client.close()
+
+    assert result["pricing_profiles"]["ok"]
+    assert len(result["payment_terms"]["data"]) == 8
+    # customers are paged: seed + the two posted.
+    assert result["customers"]["ok"]
+    names = {c["customerName"] for c in result["customers"]["data"] if "customerName" in c}
+    assert {"Dana", "Sam"} <= names
+
+    counts = v3_snapshot.save(result, tmp_path / "reports", tmp_path / "snap.json")
+    assert counts["payment_terms"] == 8
+    assert (tmp_path / "reports" / "v3-snapshot" / "pricing_profiles.json").exists()
+    # The reference file the mock will serve.
+    ref = v3_snapshot.load_reference(tmp_path / "snap.json")
+    assert "pricing_profiles" in ref and "payment_terms" in ref
+    # Records are NOT in the reference file — that is reference data only.
+    assert "customers" not in ref
+
+
+def test_field_keys_reports_the_shape_for_analysis(mock):
+    from eag_migrator import v3_snapshot
+
+    client = httpx.Client(base_url=mock)
+    try:
+        result = v3_snapshot.snapshot(client)
+    finally:
+        client.close()
+    keys = v3_snapshot.field_keys(result)
+    assert "profileName" in keys["pricing_profiles"]
+    assert "termsCode" in keys["payment_terms"]
+
+
+def test_the_mock_serves_real_reference_ids_from_a_snapshot(tmp_path):
+    """The point of snapshotting: a rehearsal uses v3's true ids, not seed ones."""
+    import json
+
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({
+        "pricing_profiles": [{"key": "REAL-PROD-UUID", "profileName": "Shop Default"}],
+        "payment_terms": [{"key": "REAL-TERMS-UUID", "termsCode": "NET30", "code": 1}],
+    }))
+
+    server = serve("127.0.0.1", 0, MockConfig(db_path=tmp_path / "m.sqlite", snapshot_path=snap))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address[:2]
+    base = f"http://{host}:{port}"
+    try:
+        pp = httpx.get(base + "/api/V1/pricing-profiles").json()["data"]
+        # Endpoints with no snapshot key fall back to the synthetic seed.
+        loc = httpx.get(base + "/api/V1/locations/names/").json()["data"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert pp == [{"key": "REAL-PROD-UUID", "profileName": "Shop Default"}]
+    assert loc and loc[0]["name"] == "Default"        # seed fallback
+
+
+def test_without_a_snapshot_the_mock_serves_the_synthetic_seed(mock):
+    from eag_migrator.mockv3 import seed
+
+    pp = httpx.get(mock + "/api/V1/pricing-profiles").json()["data"]
+    assert pp == seed.PRICING_PROFILES

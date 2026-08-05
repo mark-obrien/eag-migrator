@@ -244,6 +244,19 @@ def _v3_api_status(settings: Any) -> dict[str, Any]:
     # A migration pointed at the mock is a rehearsal, not a production write —
     # the UI needs to say so plainly and drop the warnings.
     state["mock"] = is_mock_url(state.get("base_url"))
+    # A snapshot means the mock serves v3's real reference ids, and there are
+    # files to analyze.
+    snap = STATE_DIR / "v3_snapshot.json"
+    state["snapshot"] = snap.exists()
+    if snap.exists():
+        try:
+            import json as _json
+
+            ref = _json.loads(snap.read_text())
+            state["snapshot_counts"] = {k: len(v) for k, v in ref.items()
+                                        if isinstance(v, list)}
+        except Exception:  # noqa: BLE001
+            state["snapshot_counts"] = {}
     return state
 
 
@@ -713,6 +726,26 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             return _back(request, error=f"could not reach the mock: {exc}")
         return _back(request, message="mock records wiped")
+
+    @app.post("/actions/v3-snapshot", dependencies=[Depends(require_token)])
+    def action_v3_snapshot(request: Request) -> Any:
+        def work(job: Any) -> dict[str, Any]:
+            from .. import v3_api, v3_snapshot
+
+            settings = load_settings()
+            creds = v3_api.load_credentials(settings, V3_SESSION_FILE)
+            job.say(f"reading v3 (read-only) at {creds.base_url}")
+            client = v3_api.client(settings, V3_SESSION_FILE)
+            try:
+                result = v3_snapshot.snapshot(client, say=job.say)
+            finally:
+                client.close()
+            counts = v3_snapshot.save(result, REPORTS_DIR, STATE_DIR / "v3_snapshot.json")
+            job.say(f"wrote {REPORTS_DIR / 'v3-snapshot'}")
+            job.say("the mock now serves v3's real reference ids")
+            return {"counts": counts}
+
+        return _launch(request, "v3-snapshot", "Snapshot v3 (read-only)", work)
 
     @app.post("/actions/api-get", dependencies=[Depends(require_token)])
     def action_api_get(request: Request, path: str = Form(...)) -> Any:
