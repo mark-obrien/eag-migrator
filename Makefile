@@ -56,6 +56,10 @@ dashboard: setup ## Start the web dashboard (EAGM_DASHBOARD_PORT, default 19080)
 	@test -n "$$EAGM_DASHBOARD_TOKEN" && \
 		echo "  token required — append ?token=$$EAGM_DASHBOARD_TOKEN" || true
 
+.PHONY: sample
+sample: setup ## Seed a self-contained sample migration to run against the mock
+	$(RUN) sample
+
 .PHONY: v3-snapshot
 v3-snapshot: ## Read v3 into reports/v3-snapshot/ to analyze (read-only)
 	$(RUN) v3-snapshot

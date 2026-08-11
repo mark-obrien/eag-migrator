@@ -303,3 +303,66 @@ def test_an_empty_entity_view_says_so_rather_than_erroring(mock):
     page = httpx.get(mock + "/view/jobs")
     assert page.status_code == 200
     assert "No jobs yet" in page.text
+
+
+# --- the sample migration runs end to end -----------------------------------
+
+
+def test_the_sample_migration_runs_into_the_mock_and_rolls_back(mock, tmp_path):
+    """`eagm sample` has to actually run: source -> transform -> mock -> undo."""
+    import yaml
+
+    from eag_migrator import sample as sample_mod
+    from eag_migrator.config import Settings
+    from eag_migrator.adapters import SqlSource
+    from eag_migrator.db import build_engine
+    from eag_migrator.mapping import Mapping
+    from eag_migrator.runner import Runner
+    from eag_migrator.state import RunState
+
+    made = sample_mod.create(tmp_path / "state", tmp_path / "config")
+    mapping = Mapping.model_validate(yaml.safe_load(made["mapping"].read_text()))
+
+    settings = Settings(v2_url=f"sqlite:///{made['db']}", v3_api_base_url=mock)
+    state = RunState(tmp_path / "run.sqlite")
+    runner = Runner(settings, mapping,
+                    SqlSource(build_engine(settings.v2_url)), ApiSink(mock), state)
+    try:
+        report = runner.apply()
+        assert report.total_written == 5
+        assert report.total_failed == 0
+
+        # Every fake customer reached the mock, transformed.
+        stored = httpx.get(mock + "/__mock/records").json()["records"]
+        assert len(stored) == 5
+        names = {r["payload"]["customerName"] for r in stored}
+        assert "Dana Reyes" in names
+        # The reference foreign key came through as the mock's real profile id.
+        assert all(r["payload"]["pricingProfile"] for r in stored)
+        # The email transform ran (lower-cased, trimmed).
+        assert any(r["payload"].get("email") == "dana@example.com" for r in stored)
+
+        # And it all rolls back.
+        runner.rollback(report.run_id)
+        assert httpx.get(mock + "/__mock/records").json()["count"] == 0
+    finally:
+        state.close()
+
+
+def test_the_sample_mapping_and_data_are_consistent(tmp_path):
+    """The seeded columns must cover every field the mapping reads."""
+    import yaml
+    import sqlite3
+
+    from eag_migrator import sample as sample_mod
+    from eag_migrator.mapping import Mapping
+
+    made = sample_mod.create(tmp_path / "state", tmp_path / "config")
+    mapping = Mapping.model_validate(yaml.safe_load(made["mapping"].read_text()))
+
+    cols = {r[1] for r in sqlite3.connect(made["db"]).execute("PRAGMA table_info(customers)")}
+    for entity in mapping.entities:
+        for field in entity.fields:
+            for src in (field.from_ if isinstance(field.from_, list) else [field.from_]):
+                if src:
+                    assert src in cols, f"mapping reads {src!r}, not in the sample data"

@@ -1218,6 +1218,40 @@ def api_post(
     _show_api_response(resp, path, f"api-post-{name}.json")
 
 
+@app.command()
+def sample() -> None:
+    """Seed a self-contained sample migration you can run end to end.
+
+    No v2 login, no production writes. Writes a small local database of fake
+    customers and a starter mapping to v3's API, so you can watch the whole
+    pipeline run against the local mock.
+    """
+    _settings()
+    from . import sample as sample_mod
+
+    made = sample_mod.create(STATE_DIR, CONFIG_DIR)
+    console.print(f"[green]Sample ready[/green] — {made['rows']} fake customers")
+    console.print(f"  data:    {made['db']}")
+    console.print(f"  mapping: {made['mapping']}")
+    console.print("\n[bold]To run it:[/bold]")
+    console.print("  1. Start the mock and point v3 at it:")
+    console.print("       [bold]make mock-v3[/bold]")
+    console.print("     then in .env:")
+    console.print("       [bold]V3_API_BASE_URL=http://mock-v3:19090[/bold]")
+    console.print("       [bold]V3_API_COOKIE=mock[/bold]")
+    console.print("  2. Read from the sample data instead of a real v2 — in .env:")
+    console.print(f"       [bold]V2_DATABASE_URL={sample_mod.db_url(STATE_DIR)}[/bold]")
+    console.print("  3. Make the sample mapping live:")
+    console.print(f"       [bold]cp {made['mapping']} {DEFAULT_MAPPING}[/bold]")
+    console.print("  4. Dry run, then migrate, then look:")
+    console.print("       [bold]make plan[/bold]")
+    console.print("       [bold]make migrate[/bold]   (type MIGRATE to confirm)")
+    console.print("       open [bold]http://localhost:19090/view[/bold]")
+    console.print("  5. Undo it:")
+    console.print("       [bold]make cli CMD=\"runs\"[/bold]  then  "
+                  "[bold]make cli CMD=\"rollback <run-id>\"[/bold]")
+
+
 @app.command(name="v3-snapshot")
 def v3_snapshot_cmd() -> None:
     """Read v3 as it is, into local files you can analyze. Read-only.

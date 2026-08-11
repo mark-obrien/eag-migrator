@@ -86,6 +86,7 @@ switch ($Task) {
         Write-Host "    api-post <path>  send one record and report what came back"
         Write-Host ""
         Write-Host "  Rehearsing (no production writes)"
+        Write-Host "    sample           seed a sample migration to run against the mock"
         Write-Host "    v3-snapshot      read v3 into local files to analyze (read-only)"
         Write-Host "    mock-v3          start a local stand-in for v3"
         Write-Host "    mock-v3-reset    wipe what the mock has stored"
@@ -131,6 +132,7 @@ switch ($Task) {
     "dashboard-logs" { Invoke-Compose @("logs", "-f", "dashboard") }
     "dashboard-stop" { Invoke-Compose @("stop", "dashboard") }
 
+    "sample"      { Invoke-Eagm @("sample") }
     "v3-snapshot" { Invoke-Eagm @("v3-snapshot") }
     "mock-v3" {
         Initialize-Env

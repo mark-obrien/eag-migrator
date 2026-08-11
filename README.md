@@ -891,6 +891,32 @@ straight to it. It shows what the migration *wrote*, so it is where you
 confirm names came across whole, a job resolved to the right customer, and the
 enums look sane before trusting the mapping.
 
+### A sample migration, start to finish
+
+To watch the whole pipeline run without a v2 login or any production write,
+seed a self-contained sample and migrate it into the mock:
+
+```bash
+make sample        # fake customers in state/sample.sqlite + a starter mapping
+make mock-v3       # the local target
+
+# then in .env:
+#   V3_API_BASE_URL=http://mock-v3:19090
+#   V3_API_COOKIE=mock
+#   V2_DATABASE_URL=sqlite:////app/state/sample.sqlite
+cp config/mapping.sample.yaml config/mapping.yaml
+
+make plan          # dry run — transforms everything, writes nothing
+make migrate       # writes the 5 customers into the mock (type MIGRATE)
+```
+
+Then open `http://localhost:19090/view` to see them, and undo with
+`make cli CMD="runs"` → `make cli CMD="rollback <run-id>"`. `make sample`
+prints these steps too. The starter mapping (`config/mapping.sample.yaml`) is
+a real, minimal one — customers → `/api/V1/customers`, with `customerType`
+const to Cash and `pricingProfile` const to the mock's Default profile — so it
+doubles as a worked example of the mapping you write for real.
+
 ### Rehearsing against a local mock v3
 
 Writing to a production tenant to find out whether the mapping is right is a
@@ -944,6 +970,7 @@ any difference, then run for real.
 | Command | Purpose |
 |---|---|
 | `eagm dashboard` | Serve the web dashboard (localhost:19080) |
+| `eagm sample` | Seed a self-contained sample migration to run against the mock |
 | `eagm v3-snapshot` | Read v3 read-only into reports/v3-snapshot/ to analyze |
 | `eagm mock-v3` | Serve a local stand-in for v3, to rehearse a migration |
 | `eagm doctor` | Check both connections and show where state and config live |
@@ -981,7 +1008,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-250 tests, in eight groups:
+252 tests, in eight groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
@@ -1054,6 +1081,7 @@ src/eag_migrator/
   dashboard/               the web UI (FastAPI + server-rendered templates)
   mockv3/                  a local stand-in for v3's API, for rehearsals
   v3_snapshot.py           read v3 read-only into local files to analyze
+  sample.py                seed a self-contained sample migration
   v3_api.py                v3 API credentials (token or session cookie)
   discovery.py             schema introspection and fingerprinting
   scaffold.py              draft-mapping generator
