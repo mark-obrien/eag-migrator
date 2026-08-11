@@ -63,10 +63,23 @@ harvest config, the mapping and its unanswered TODOs, what is in staging, and
 every run. The buttons run the same code the CLI does — there is no second
 implementation, so the UI cannot drift from `eagm`.
 
-The whole pipeline is reachable from it: sign in to v2, recon, capture, draft
-selectors from HTML, choose which config in `config/` is live, harvest,
-connect to v3's API and probe it, discover, scaffold, plan, migrate, verify
-and roll back.
+The whole pipeline is reachable from it — nothing needs a console. Sign in to
+v2, recon, capture, draft selectors from HTML, choose which config is live,
+harvest, connect to v3 and snapshot/probe it, edit the mapping in the browser,
+plan, rehearse against the built-in mock, migrate, verify and roll back. A
+**How to run the migration** panel at the top lays out the order and shows the
+single next step for wherever you are.
+
+Two things make the browser flow self-contained:
+
+- **The mock v3 runs inside the dashboard.** *Point at the mock* and the
+  migration writes to it in-process; the banner-marked browser view is at
+  `http://localhost:19090/view`. No separate service to start
+  (`EAGM_DASHBOARD_MOCK=0` turns it off).
+- **The v2 source resolves itself.** With no `V2_DATABASE_URL`, the migration
+  reads from the harvested staging database once you've harvested — or from
+  the sample after *Load sample data* — so there's no `.env` editing between
+  steps. The Migrate card shows what it will read and write.
 
 ### Connecting to v3
 
@@ -1008,7 +1021,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-252 tests, in eight groups:
+258 tests, in eight groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like

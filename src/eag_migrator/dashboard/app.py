@@ -326,6 +326,7 @@ def build_status() -> dict[str, Any]:
         "harvest": _harvest_status(),
         "mapping": _mapping_status(),
         "staging": _staging_status(),
+        "v2_source": _v2_source(settings)[1],
         "runs": runs,
         "job": current.to_dict() if current else None,
         "last_job": last.to_dict() if last else None,
@@ -345,16 +346,54 @@ def build_status() -> dict[str, Any]:
     }
 
 
+def _v2_source_override() -> Path:
+    # A function, not a constant, so tests that repoint STATE_DIR are honoured.
+    return STATE_DIR / "v2_source.txt"
+
+
+def _v2_source(settings: Any) -> tuple[str | None, str]:
+    """(url, label) for where the migration reads v2 from.
+
+    Precedence: an explicit V2_DATABASE_URL, then a dashboard-chosen source
+    (the sample), then the harvested staging database. So the browser flow
+    (sign in, harvest, migrate) needs no .env editing between steps.
+    """
+    if settings.v2_url:
+        return settings.v2_url, "V2_DATABASE_URL"
+    override = _v2_source_override()
+    if override.exists():
+        url = override.read_text().strip()
+        if url:
+            name = "sample data" if "sample" in url else url
+            return url, name
+    if STAGING_DB.exists():
+        return f"sqlite:///{STAGING_DB}", "harvested staging"
+    return None, "not set"
+
+
+def _v2_source_url(settings: Any) -> str:
+    url, _ = _v2_source(settings)
+    if not url:
+        raise ValueError(
+            "No v2 source yet. Harvest v2 into staging first (phase 2), load the "
+            "sample, or set V2_DATABASE_URL."
+        )
+    return url
+
+
+def _v3_sink(settings: Any):
+    """The write target, honouring a v3 API connection made from the dashboard."""
+    from .. import v3_api
+
+    creds = v3_api.load_credentials(settings, V3_SESSION_FILE)
+    if creds.base_url:
+        return ApiSink(creds.base_url, creds.token, settings.v3_api_timeout,
+                       cookie=creds.cookie)
+    return SqlSink(build_engine(settings.url_for("v3")), settings.v3_schema)
+
+
 def _runner(state: RunState, mapping: Mapping, job: Any = None) -> Runner:
     settings = load_settings()
-    sink = (
-        ApiSink(
-            settings.v3_api_base_url, settings.v3_api_token, settings.v3_api_timeout,
-            cookie=settings.v3_api_cookie,
-        )
-        if settings.v3_api_base_url
-        else SqlSink(build_engine(settings.url_for("v3")), settings.v3_schema)
-    )
 
     def progress(entity: str, done: int, total: int) -> None:
         if job:
@@ -364,8 +403,8 @@ def _runner(state: RunState, mapping: Mapping, job: Any = None) -> Runner:
     return Runner(
         settings,
         mapping,
-        SqlSource(build_engine(settings.url_for("v2")), settings.v2_schema),
-        sink,
+        SqlSource(build_engine(_v2_source_url(settings)), settings.v2_schema),
+        _v3_sink(settings),
         state,
         progress=progress,
         should_stop=(job.should_stop if job else None),
@@ -375,8 +414,45 @@ def _runner(state: RunState, mapping: Mapping, job: Any = None) -> Runner:
 # --- app --------------------------------------------------------------------
 
 
+_MOCK_SERVER: Any = None
+
+
+def _mock_port() -> int:
+    try:
+        return int(os.getenv("EAGM_MOCK_PORT", "19090"))
+    except ValueError:
+        return 19090
+
+
+def start_mock() -> None:
+    """Run the mock v3 inside the dashboard, so a rehearsal needs no console.
+
+    Same process, so a migration pointed at localhost:<port> reaches it, and
+    the browser reaches it on the published port. Off with EAGM_DASHBOARD_MOCK=0.
+    """
+    global _MOCK_SERVER
+    if _MOCK_SERVER is not None or os.getenv("EAGM_DASHBOARD_MOCK", "1") == "0":
+        return
+    import threading
+
+    from ..mockv3 import MockConfig, serve
+
+    try:
+        server = serve(
+            "0.0.0.0", _mock_port(),
+            MockConfig(db_path=STATE_DIR / "mockv3.sqlite",
+                       snapshot_path=STATE_DIR / "v3_snapshot.json"),
+        )
+    except OSError:
+        # Port in use (a standalone mock is already running) — leave it be.
+        return
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _MOCK_SERVER = server
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="EAG migrator", docs_url=None, redoc_url=None)
+    start_mock()
 
     def page(request: Request, template: str, **context: Any) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
@@ -396,10 +472,30 @@ def create_app() -> FastAPI:
     def index(request: Request) -> HTMLResponse:
         return page(request, "index.html", status=build_status())
 
+    _DEFAULT_MAPPING = (
+        "version: 1\n"
+        "defaults:\n  batch_size: 100\n  on_error: record\n"
+        "entities:\n"
+        "  - name: customers\n"
+        "    source:\n      table: customer_details   # a harvested staging table\n"
+        "      key: id\n"
+        "    target:\n      table: customers\n"
+        "      endpoint: /api/V1/customers\n      key: id\n      conflict: skip\n"
+        "    fields:\n"
+        "      - to: customerName\n        from: full_name\n"
+        "        transform: [trim]\n        required: true\n"
+        "      - to: phoneNumber\n        from: phone\n        transform: [phone]\n"
+        "      - to: email\n        from: email\n        transform: [trim, email]\n"
+        "      - to: customerType\n        const: 9        # Cash — confirm the code\n"
+        "      - to: pricingProfile\n"
+        "        const: \"PASTE-A-REAL-UUID\"   # from v3-snapshot\n"
+    )
+
     @app.get("/mapping", response_class=HTMLResponse, dependencies=[Depends(require_token)])
     def mapping_view(request: Request) -> HTMLResponse:
         if not MAPPING_FILE.exists():
-            return page(request, "mapping.html", mapping=None, raw=None, error=None)
+            return page(request, "mapping.html", mapping=None, raw=None, error=None,
+                        default_mapping=_DEFAULT_MAPPING)
         try:
             mapping = load_mapping(MAPPING_FILE)
             entities = [
@@ -431,6 +527,7 @@ def create_app() -> FastAPI:
                 mapping=entities,
                 raw=MAPPING_FILE.read_text(encoding="utf-8"),
                 error=None,
+                default_mapping=_DEFAULT_MAPPING,
             )
         except Exception as exc:  # noqa: BLE001
             return page(
@@ -439,7 +536,20 @@ def create_app() -> FastAPI:
                 mapping=None,
                 raw=MAPPING_FILE.read_text(encoding="utf-8"),
                 error=f"{type(exc).__name__}: {exc}",
+                default_mapping=_DEFAULT_MAPPING,
             )
+
+    @app.post("/actions/mapping-save", dependencies=[Depends(require_token)])
+    def action_mapping_save(request: Request, body: str = Form(...)) -> Any:
+        import yaml
+
+        try:
+            Mapping.model_validate(yaml.safe_load(body) or {})
+        except Exception as exc:  # noqa: BLE001 - report, do not save a broken mapping
+            return _back(request, error=f"not saved — {type(exc).__name__}: {exc}")
+        MAPPING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MAPPING_FILE.write_text(body, encoding="utf-8")
+        return _back(request, message="mapping saved", to="/mapping")
 
     @app.get("/staging", response_class=HTMLResponse, dependencies=[Depends(require_token)])
     def staging_view(
@@ -574,7 +684,8 @@ def create_app() -> FastAPI:
 
     # --- actions ------------------------------------------------------------
 
-    def _back(request: Request, message: str | None = None, error: str | None = None):
+    def _back(request: Request, message: str | None = None, error: str | None = None,
+              to: str = "/"):
         # Messages carry exception text, which can contain & or # — encode it
         # rather than let it split the query string.
         from urllib.parse import urlencode
@@ -586,7 +697,7 @@ def create_app() -> FastAPI:
             params["msg"] = message[:300]
         if error:
             params["err"] = error[:300]
-        url = "/" + (f"?{urlencode(params)}" if params else "")
+        url = to + (f"?{urlencode(params)}" if params else "")
         return RedirectResponse(url, status_code=303)
 
     def _launch(request: Request, kind: str, label: str, work):
@@ -706,13 +817,31 @@ def create_app() -> FastAPI:
 
     @app.post("/actions/v3-use-mock", dependencies=[Depends(require_token)])
     def action_v3_use_mock(request: Request) -> Any:
-        """Point v3 at the local mock, so writes are a rehearsal not production."""
+        """Point v3 at the in-dashboard mock, so writes are a rehearsal."""
         from .. import v3_api
 
-        url = os.getenv("EAGM_MOCK_URL", "http://mock-v3:19090")
-        # The mock needs no real auth; a placeholder cookie just marks it ready.
+        # The mock runs in this process on localhost:<port>, so the migration
+        # (also this process) reaches it there. A placeholder cookie marks it
+        # ready; the mock needs no real auth.
+        url = os.getenv("EAGM_MOCK_URL", f"http://localhost:{_mock_port()}")
         v3_api.save_cookie(url, "mock=1", V3_SESSION_FILE)
-        return _back(request, message=f"v3 pointed at the mock ({url}) — writes are a rehearsal")
+        return _back(request, message="v3 pointed at the mock — writes are a rehearsal")
+
+    @app.post("/actions/load-sample", dependencies=[Depends(require_token)])
+    def action_load_sample(request: Request) -> Any:
+        """Seed the sample data + mapping, so a demo run needs no console."""
+        from .. import sample as sample_mod
+
+        made = sample_mod.create(STATE_DIR, CONFIG_DIR)
+        # Make the sample mapping live and point v2 at the sample data, so the
+        # next Plan/Migrate just runs.
+        MAPPING_FILE.write_text(made["mapping"].read_text(), encoding="utf-8")
+        _v2_source_override().write_text(f"sqlite:///{made['db']}")
+        return _back(
+            request,
+            message=f"sample loaded — {made['rows']} customers and a mapping. "
+                    "Point v3 at the mock, then Plan.",
+        )
 
     @app.post("/actions/mock-reset", dependencies=[Depends(require_token)])
     def action_mock_reset(request: Request) -> Any:
@@ -1150,6 +1279,10 @@ def create_app() -> FastAPI:
                 for item in collection.scrubbed.summary():
                     job.say(f"  {collection.name}: {item}")
             job.say(f"stored {report.total_stored:,} record(s)")
+            # A real harvest is now the v2 source — drop any sample override.
+            override = _v2_source_override()
+            if override.exists():
+                override.unlink()
             return {"stored": report.total_stored, "failed": report.total_failed}
 
         return _launch(request, "harvest", "Harvest v2", work)

@@ -71,6 +71,9 @@ services:
     # EAGM_DASHBOARD_PORT in .env.
     ports:
       - "127.0.0.1:${EAGM_DASHBOARD_PORT:-19080}:19080"
+      # The dashboard runs the mock v3 in-process, so a rehearsal and its
+      # /view browser both work with nothing else started.
+      - "127.0.0.1:${EAGM_MOCK_PORT:-19090}:19090"
     entrypoint: ["eagm", "dashboard", "--host", "0.0.0.0", "--port", "19080"]
 
   # --- A local stand-in for v3, for rehearsing a migration -----------------

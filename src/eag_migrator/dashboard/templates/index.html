@@ -74,6 +74,56 @@
     </div>
   </div>
 
+  <!-- Directions --------------------------------------------------------- -->
+  <div class="card wide" id="guide">
+    <h2 style="display:block">How to run the migration</h2>
+    {# work out the single next step from live state #}
+    {% if not v2_ready %}
+      {% set next = "Connect to v2 below (phase 1) — sign in, or paste a Cookie header." %}
+    {% elif not staged and s.v2_source == 'not set' %}
+      {% set next = "Harvest v2 into staging (phase 2): make a config live, then Harvest — start with limit 2." %}
+    {% elif not v3_ready %}
+      {% set next = "Connect to v3 (phase 3): real v3 to snapshot it, or Point at the mock to rehearse." %}
+    {% elif not map_ready %}
+      {% set next = "Write the mapping (phase 4): Scaffold a draft or edit it in Mapping, then it goes live." %}
+    {% elif not (s.runs and s.runs|length) %}
+      {% set next = "Dry run, then migrate (phase 5). Rehearse against the mock first." %}
+    {% else %}
+      {% set next = "Verify the run, and roll back if anything is off (phase 5)." %}
+    {% endif %}
+    <div class="flash msg" style="margin:0 0 12px">
+      <strong>Next:</strong> {{ next }}
+    </div>
+
+    <div class="muted">The whole migration runs from this page. In order:</div>
+    <ol style="margin:8px 0 0; padding-left:20px; line-height:1.7">
+      <li><strong>Read v2.</strong> A database URL in <code>.env</code>, or sign
+        in and harvest the site into staging (phases 1–2). Try
+        <em>Harvest</em> with a limit of 2 first, and check what landed.</li>
+      <li><strong>Learn v3's contract.</strong> Connect to real v3, then
+        <em>Snapshot v3</em> for its real ids, and one <em>Send a record</em>
+        to see the payload it expects (phase 3).</li>
+      <li><strong>Write the mapping.</strong> <em>Scaffold</em> a draft, or open
+        <a href="/mapping{{ q }}">Mapping</a> and edit it in the browser, then
+        promote it (phase 4).</li>
+      <li><strong>Rehearse.</strong> <em>Point at the mock</em>, Plan, Migrate,
+        then <a href="{{ s.mock_browse_url }}" target="_blank" rel="noopener">browse
+        what landed</a> and roll back. Repeat until clean (phases 3, 5).</li>
+      <li><strong>Run it.</strong> Point v3 back at production, Plan, Migrate,
+        Verify (phase 5). Rollback is always there.</li>
+    </ol>
+    <div class="actions">
+      <form method="post" action="/actions/load-sample{{ q }}">
+        <button>Load sample data</button>
+      </form>
+      <a href="{{ s.mock_browse_url }}" target="_blank" rel="noopener">
+        <button type="button">Browse the mock →</button></a>
+    </div>
+    <div class="muted" style="margin-top:6px">New here? <em>Load sample data</em>
+      seeds fake customers and a mapping; then Point at the mock and Migrate to
+      watch the whole pipeline run — no real system touched.</div>
+  </div>
+
   <!-- 1 — Connect to v2 -------------------------------------------------- -->
   <div class="card" id="v2">
     <h2><span class="phase {{ 'done' if v2_ready else '' }}">1</span>Connect to v2</h2>
@@ -463,8 +513,13 @@
   <!-- 5 — Migrate -------------------------------------------------------- -->
   <div class="card" id="migrate">
     <h2><span class="phase">5</span>Migrate</h2>
+    <div class="row"><span class="k">reads v2 from</span>
+      <span class="{{ 'warn' if s.v2_source == 'not set' else '' }}">{{ s.v2_source }}</span></div>
+    <div class="row"><span class="k">writes v3 to</span>
+      <span>{% if s.v3api.mock %}<span class="ok">the mock (rehearsal)</span>
+        {% elif s.v3api.ready %}{{ s.v3api.base_url }}{% else %}<span class="warn">not connected</span>{% endif %}</span></div>
     {% if not map_ready %}
-      <p class="note">Needs a valid mapping first (phase 4).</p>
+      <p class="note" style="margin-top:8px">Needs a valid mapping first (phase 4).</p>
     {% endif %}
 
     <form method="post" action="/actions/plan{{ q }}">

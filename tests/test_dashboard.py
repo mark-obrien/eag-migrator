@@ -37,6 +37,8 @@ def workspace(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(dash, "V3_SESSION_FILE", state / "v3_session.json")
     for name in ("V3_API_BASE_URL", "V3_API_TOKEN", "V3_API_COOKIE"):
         monkeypatch.delenv(name, raising=False)
+    # Don't bind the in-process mock's real socket during tests.
+    monkeypatch.setenv("EAGM_DASHBOARD_MOCK", "0")
     monkeypatch.setattr(dash, "MAPPING_FILE", tmp_path / "config" / "mapping.yaml")
     monkeypatch.setattr(dash, "MAPPING_DRAFT", tmp_path / "config" / "mapping.draft.yaml")
     monkeypatch.setattr(dash, "HARVEST_FILE", tmp_path / "config" / "harvest.yaml")
@@ -1032,3 +1034,78 @@ def test_reset_mock_refuses_when_v3_is_a_real_tenant(workspace, client):
     res = client.post("/actions/mock-reset", follow_redirects=False)
     assert res.status_code == 303
     assert "not+pointed+at+the+mock" in res.headers["location"]
+
+
+# --- everything from the dashboard ------------------------------------------
+
+
+def test_migration_reads_from_staging_when_no_env_url(workspace, monkeypatch):
+    """After a harvest, the dashboard migrates from staging with no .env line."""
+    import sqlite3
+    from eag_migrator.config import load_settings
+
+    monkeypatch.delenv("V2_DATABASE_URL", raising=False)
+    dash.STAGING_DB.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(dash.STAGING_DB).executescript("CREATE TABLE t(id INTEGER);")
+
+    url, label = dash._v2_source(load_settings())
+    assert url == f"sqlite:///{dash.STAGING_DB}"
+    assert label == "harvested staging"
+
+
+def test_the_migration_sink_honours_a_dashboard_v3_connection(workspace, monkeypatch):
+    """A v3 API connection made in the browser must drive the migration.
+
+    The old code only read V3_API_BASE_URL from the env, so a session saved via
+    the dashboard was silently ignored and the run fell back to a SQL sink."""
+    from eag_migrator.adapters.api_sink import ApiSink
+    from eag_migrator.config import load_settings
+    from eag_migrator.web.session import Session
+
+    monkeypatch.delenv("V3_API_BASE_URL", raising=False)
+    Session.from_cookie_header("s=1", "https://v3.example").save(dash.V3_SESSION_FILE)
+
+    sink = dash._v3_sink(load_settings())
+    assert isinstance(sink, ApiSink)
+    sink.close()
+
+
+def test_the_mapping_can_be_edited_in_the_browser(workspace, client):
+    good = (
+        "version: 1\n"
+        "entities:\n"
+        "  - name: customers\n"
+        "    source: {table: c, key: id}\n"
+        "    target: {table: c, endpoint: /api/V1/customers, key: id}\n"
+        "    fields: [{to: customerName, from: full_name}]\n"
+    )
+    res = client.post("/actions/mapping-save", data={"body": good}, follow_redirects=False)
+    assert res.status_code == 303
+    assert "/mapping" in res.headers["location"]
+    assert dash.MAPPING_FILE.read_text() == good
+
+
+def test_a_broken_mapping_is_reported_and_not_saved(workspace, client):
+    res = client.post("/actions/mapping-save", data={"body": "entities: [{oops: 1}]"},
+                      follow_redirects=False)
+    assert res.status_code == 303
+    assert "not+saved" in res.headers["location"]
+    assert not dash.MAPPING_FILE.exists()
+
+
+def test_load_sample_seeds_data_a_mapping_and_points_the_source(workspace, client):
+    res = client.post("/actions/load-sample", follow_redirects=False)
+    assert res.status_code == 303
+    assert dash.MAPPING_FILE.exists()
+    assert "customerName" in dash.MAPPING_FILE.read_text()
+    # The v2 source now points at the sample, not staging.
+    override = dash.STATE_DIR / "v2_source.txt"
+    assert override.exists() and "sample" in override.read_text()
+
+
+def test_the_guide_shows_the_next_step(client):
+    page = client.get("/").text
+    assert "How to run the migration" in page
+    assert "Next:" in page
+    # With nothing configured, the first step is connecting to v2.
+    assert "Connect to v2 below" in page

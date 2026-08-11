@@ -2,6 +2,11 @@
 {% block nav_map %}on{% endblock %}
 {% block content %}
 <h2>Mapping</h2>
+{% if request.query_params.get('err') %}
+  <div class="flash err">{{ request.query_params.get('err') }}</div>
+{% elif request.query_params.get('msg') %}
+  <div class="flash msg">{{ request.query_params.get('msg') }}</div>
+{% endif %}
 {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
 
 {% if mapping %}
@@ -43,10 +48,14 @@
   <p class="muted">No mapping yet. Run Discover then Scaffold on the overview.</p>
 {% endif %}
 
-{% if raw %}
-  <details style="margin-top:16px">
-    <summary>config/mapping.yaml</summary>
-    <pre>{{ raw }}</pre>
-  </details>
-{% endif %}
+<h2 style="margin-top:22px">Edit</h2>
+<p class="muted">The mapping is just YAML. Edit it here and Save — it is
+validated on save, so a mistake is reported rather than stored.</p>
+<form method="post" action="/actions/mapping-save{{ q }}">
+  <textarea name="body" rows="22" spellcheck="false"
+    style="font-family:var(--mono);font-size:12.5px">{{ raw or default_mapping }}</textarea>
+  <div class="actions">
+    <button class="primary">Save mapping</button>
+  </div>
+</form>
 {% endblock %}
