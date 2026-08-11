@@ -63,7 +63,9 @@ def test_overview_renders_with_nothing_configured(client):
     res = client.get("/")
     assert res.status_code == 200
     assert "EAG migrator" in res.text
-    assert "not configured" in res.text
+    # The web path leads; a database is a tucked-away alternative.
+    assert "no database needed" in res.text
+    assert "Sign in to v2" in res.text
 
 
 def test_status_endpoint_describes_the_whole_pipeline(client):
@@ -1109,3 +1111,21 @@ def test_the_guide_shows_the_next_step(client):
     assert "Next:" in page
     # With nothing configured, the first step is connecting to v2.
     assert "Connect to v2 below" in page
+
+
+def test_web_only_makes_both_sides_ready_without_a_database(workspace, client, monkeypatch):
+    """The user's case: scrape v2, write v3's API, no database anywhere."""
+    from eag_migrator.web.session import Session
+
+    monkeypatch.delenv("V2_DATABASE_URL", raising=False)
+    monkeypatch.delenv("V3_DATABASE_URL", raising=False)
+    Session.from_cookie_header("cv=1", "https://v2.example").save(dash.SESSION_FILE)
+    Session.from_cookie_header("v3=1", "https://v3.example").save(dash.V3_SESSION_FILE)
+
+    page = client.get("/").text
+    # The status strip shows both ready off a session and an API connection.
+    assert "v2 ready" in page
+    assert "v3 ready" in page
+    # The database options are present but tucked behind a disclosure.
+    assert "Have a v2 database instead?" in page
+    assert "Have a v3 database instead?" in page

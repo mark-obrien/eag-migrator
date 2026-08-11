@@ -95,14 +95,15 @@
       <strong>Next:</strong> {{ next }}
     </div>
 
-    <div class="muted">The whole migration runs from this page. In order:</div>
+    <div class="muted">No database needed on either side — v2 is scraped, v3 is
+      written through its API. The whole migration runs from this page, in order:</div>
     <ol style="margin:8px 0 0; padding-left:20px; line-height:1.7">
-      <li><strong>Read v2.</strong> A database URL in <code>.env</code>, or sign
-        in and harvest the site into staging (phases 1–2). Try
-        <em>Harvest</em> with a limit of 2 first, and check what landed.</li>
-      <li><strong>Learn v3's contract.</strong> Connect to real v3, then
-        <em>Snapshot v3</em> for its real ids, and one <em>Send a record</em>
-        to see the payload it expects (phase 3).</li>
+      <li><strong>Sign in to v2 and harvest it</strong> into staging (phases
+        1–2). Try <em>Harvest</em> with a limit of 2 first, and check what
+        landed.</li>
+      <li><strong>Learn v3's contract.</strong> Connect to real v3 with your
+        session cookie, then <em>Snapshot v3</em> for its real ids, and one
+        <em>Send a record</em> to see the payload it expects (phase 3).</li>
       <li><strong>Write the mapping.</strong> <em>Scaffold</em> a draft, or open
         <a href="/mapping{{ q }}">Mapping</a> and edit it in the browser, then
         promote it (phase 4).</li>
@@ -127,29 +128,9 @@
   <!-- 1 — Connect to v2 -------------------------------------------------- -->
   <div class="card" id="v2">
     <h2><span class="phase {{ 'done' if v2_ready else '' }}">1</span>Connect to v2</h2>
-    <p class="muted">The source. A database if you have one, otherwise a signed-in
-      web session.</p>
+    <p class="muted">The source. Sign in and scrape it — no database needed.</p>
 
     <div class="sub">
-      <div class="row">
-        <span class="k">database</span>
-        <span>
-          {% if not (v2db and v2db.configured) %}<span class="pill">not configured</span>
-          {% elif v2db.ok %}<span class="pill ok">connected</span>
-          {% else %}<span class="pill bad">unreachable</span>{% endif %}
-        </span>
-      </div>
-      {% if v2db and v2db.configured %}
-        <div class="mono muted" style="word-break:break-all">{{ v2db.url }}</div>
-        {% if not v2db.ok %}<div class="note">{{ v2db.message }}</div>{% endif %}
-      {% else %}
-        <div class="muted">Set <span class="mono">V2_DATABASE_URL</span> in
-          <span class="mono">.env</span>, or use a web session below.</div>
-      {% endif %}
-    </div>
-
-    <div class="sub">
-      <h3>Web session</h3>
       {% if s.session.present %}
         <div class="row"><span class="k">origin</span>
           <span class="mono">{{ s.session.origin }}</span></div>
@@ -201,13 +182,29 @@
         </details>
       {% endif %}
     </div>
+
+    <details style="margin-top:12px">
+      <summary class="muted">Have a v2 database instead?</summary>
+      <div style="margin-top:8px">
+        {% if v2db and v2db.configured %}
+          <div class="row"><span class="k">database</span>
+            <span class="pill {{ 'ok' if v2db.ok else 'bad' }}">{{ 'connected' if v2db.ok else 'unreachable' }}</span></div>
+          <div class="mono muted" style="word-break:break-all">{{ v2db.url }}</div>
+          {% if not v2db.ok %}<div class="note">{{ v2db.message }}</div>{% endif %}
+        {% else %}
+          <div class="muted">Set <span class="mono">V2_DATABASE_URL</span> in
+            <span class="mono">.env</span> and skip the harvest — the mapping reads
+            it directly.</div>
+        {% endif %}
+      </div>
+    </details>
   </div>
 
   <!-- 2 — Extract v2 into staging --------------------------------------- -->
   <div class="card" id="extract">
     <h2><span class="phase {{ 'done' if staged else '' }}">2</span>Extract into staging</h2>
-    <p class="muted">Only for the web path — pull v2 into a local database the
-      mapping can read. Skip it if v2 is a database.</p>
+    <p class="muted">Scrape v2 into a local database the mapping reads. This is
+      the path when there is no v2 database — the usual case.</p>
 
     {% if not s.browser.available %}
       <div class="note">No browser in this image, so Capture and “sign in for me”
@@ -326,9 +323,8 @@
             <span class="mono">{{ "{:,}".format(t.rows) }}</span>
           </div>
         {% endfor %}
-        <p class="muted" style="margin-top:10px">To migrate from this, point
-          <span class="mono">V2_DATABASE_URL</span> at
-          <span class="mono">sqlite:////app/state/staging.sqlite</span>.</p>
+        <p class="muted" style="margin-top:10px">The migration reads this
+          automatically — nothing else to set.</p>
       {% else %}
         <p class="muted">Nothing harvested yet.</p>
       {% endif %}
@@ -338,25 +334,8 @@
   <!-- 3 — Connect to v3 -------------------------------------------------- -->
   <div class="card" id="v3">
     <h2><span class="phase {{ 'done' if v3_ready else '' }}">3</span>Connect to v3</h2>
-    <p class="muted">The destination. A database, or its HTTP API.</p>
-
-    <div class="sub">
-      <div class="row">
-        <span class="k">database</span>
-        <span>
-          {% if not (v3db and v3db.configured) %}<span class="pill">not configured</span>
-          {% elif v3db.ok %}<span class="pill ok">connected</span>
-          {% else %}<span class="pill bad">unreachable</span>{% endif %}
-        </span>
-      </div>
-      {% if v3db and v3db.configured %}
-        <div class="mono muted" style="word-break:break-all">{{ v3db.url }}</div>
-        {% if not v3db.ok %}<div class="note">{{ v3db.message }}</div>{% endif %}
-      {% else %}
-        <div class="muted">Set <span class="mono">V3_DATABASE_URL</span>, or use
-          the API below.</div>
-      {% endif %}
-    </div>
+    <p class="muted">The destination. Write through its HTTP API with your
+      session — no database needed.</p>
 
     <div class="sub">
       <h3>HTTP API
@@ -464,12 +443,28 @@
         </form>
       </details>
     </div>
+
+    <details style="margin-top:12px">
+      <summary class="muted">Have a v3 database instead?</summary>
+      <div style="margin-top:8px">
+        {% if v3db and v3db.configured %}
+          <div class="row"><span class="k">database</span>
+            <span class="pill {{ 'ok' if v3db.ok else 'bad' }}">{{ 'connected' if v3db.ok else 'unreachable' }}</span></div>
+          <div class="mono muted" style="word-break:break-all">{{ v3db.url }}</div>
+          {% if not v3db.ok %}<div class="note">{{ v3db.message }}</div>{% endif %}
+        {% else %}
+          <div class="muted">Set <span class="mono">V3_DATABASE_URL</span> in
+            <span class="mono">.env</span> to write to a database instead of the API.</div>
+        {% endif %}
+      </div>
+    </details>
   </div>
 
   <!-- 4 — Map v2 → v3 ---------------------------------------------------- -->
   <div class="card" id="map">
     <h2><span class="phase {{ 'done' if map_ready else '' }}">4</span>Map v2 → v3</h2>
-    <p class="muted">Introspect both schemas, draft a mapping, answer its TODOs.</p>
+    <p class="muted">Draft a mapping and answer its TODOs. Discover reads a v2
+      database if you have one; otherwise write the mapping directly.</p>
 
     <div class="flow" style="gap:8px">
       <form method="post" action="/actions/discover{{ q }}" style="display:flex;gap:8px;align-items:center">

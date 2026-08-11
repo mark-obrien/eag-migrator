@@ -15,13 +15,18 @@ driven entirely by `config/mapping.yaml`.
 
 ## Two ways in
 
-**If you can reach v2's database or API**, go to [Quick start](#quick-start).
+**No database on either side — only web logins.** This is the EAG case, and
+the tool is built for it: sign in and **scrape v2** into a local staging
+database, then **write v3 through its HTTP API** with your session cookie. No
+database connection anywhere. Open the dashboard (`make dashboard`) and its
+*How to run the migration* panel walks the whole thing; the reference for the
+web path is [No database, no API](#no-database-no-api) (v2) and
+[Writing through v3's API](#writing-through-v3s-api-instead-of-its-database)
+(v3).
 
-**If you cannot** — no credentials, no DB access, only a login to the app
-itself — read v2 over HTTP instead. See
-[No database, no API](#no-database-no-api). It signs in, finds the app's own
-internal API, and harvests it into a local staging database; from there the
-pipeline below is identical.
+**If you _do_ have a database or API on either side**, that path exists too —
+go to [Quick start](#quick-start). The two can be mixed: scrape v2, write a v3
+database, or read a v2 database and write v3's API.
 
 ## What you need to supply
 
@@ -1021,7 +1026,7 @@ make test          # in the container
 make test-local    # on the host
 ```
 
-258 tests, in eight groups:
+259 tests, in eight groups:
 
 - **The database path** — transforms plus the full pipeline (discover,
   scaffold, plan, run, verify, rollback) against fixture databases shaped like
