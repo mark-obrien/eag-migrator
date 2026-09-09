@@ -44,6 +44,62 @@ class AuthExpired(RuntimeError):
     """The session stopped being valid part-way through a harvest."""
 
 
+_LOGIN_MARKERS = re.compile(
+    r"\b(sign in|signin|log ?in|password|forgot your password|remember me|"
+    r"two.factor|authenticate)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_login(html: str, url: str) -> str | None:
+    """Evidence that this response is the sign-in screen, not the record.
+
+    An expired cookie does not fail a request. The app answers HTTP 200 and
+    renders its login page, so status codes cannot tell you the session died
+    — only the body can.
+    """
+    if re.search(r"/(login|signin|sign-in|auth|sso)(\?|/|$)", url.lower()):
+        return f"the request ended at {url}"
+    soup = BeautifulSoup(html, "lxml")
+    if soup.find("input", attrs={"type": "password"}):
+        return "the page has a password input"
+    title = soup.title.get_text(strip=True) if soup.title else ""
+    if title and _LOGIN_MARKERS.search(title):
+        return f"the page title is {title!r}"
+    return None
+
+
+class _LoginGuard:
+    """Stop a harvest that is really just downloading the login page.
+
+    `site.requires_auth` only proves a session was supplied, not that it still
+    works — so without this an expired cookie harvests thousands of sign-in
+    pages, stores nothing, and reports success. Only pages that yielded no
+    record are examined, and only until the first real record proves the
+    session good, so a healthy run pays almost nothing for it.
+    """
+
+    def __init__(self, budget: int = 5) -> None:
+        self.budget = budget
+        self.satisfied = False
+
+    def passed(self) -> None:
+        """A real record came out, so the session is definitely valid."""
+        self.satisfied = True
+
+    def check(self, html: str, url: str) -> None:
+        if self.satisfied or self.budget <= 0:
+            return
+        self.budget -= 1
+        why = _looks_like_login(html, url)
+        if why:
+            raise AuthExpired(
+                f"{url} answered with a sign-in page — {why}. The session is no "
+                f"longer valid, so every page would be harvested as the login "
+                f"screen. Sign in to v2 again, then re-run the harvest."
+            )
+
+
 # --- configuration ----------------------------------------------------------
 
 
@@ -550,11 +606,12 @@ def harvest(
             )
 
         wanted = set(collections) if collections else None
+        guard = _LoginGuard()
         for collection in config.active():
             if wanted and collection.name not in wanted:
                 continue
             result = _harvest_collection(
-                fetcher, collection, staging, config.site.max_pages, limit, say
+                fetcher, collection, staging, config.site.max_pages, limit, say, guard
             )
             report.collections.append(result)
 
@@ -574,6 +631,7 @@ def _harvest_collection(
     max_pages: int,
     limit: int,
     say: Any,
+    guard: _LoginGuard | None = None,
 ) -> CollectionResult:
     result = CollectionResult(name=collection.name)
     if collection.note:
@@ -726,6 +784,10 @@ def _harvest_collection(
             result.failed += 1
             if len(result.errors) < 50:
                 result.errors.append({"url": url, "error": str(exc)})
+            # A JSON collection handed the login page fails here, at
+            # resp.json(), before the check below ever runs.
+            if guard is not None:
+                guard.check(resp.text, resp.url)
             continue
 
         if carry:
@@ -741,6 +803,16 @@ def _harvest_collection(
                     for name in collection.extract.require
                 )
             ]
+
+        # A page that yielded nothing is either the end of the data or the
+        # sign-in screen, and only the body tells those apart. Checking here
+        # means a dead session is caught on the first empty page rather than
+        # after walking every URL in the config.
+        if guard is not None:
+            if found:
+                guard.passed()
+            else:
+                guard.check(resp.text, resp.url)
 
         if miss_budget:
             if found:

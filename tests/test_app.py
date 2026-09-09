@@ -138,6 +138,32 @@ def test_harvest_refuses_to_run_unauthenticated_on_an_auth_app(app, tmp_path):
             harvest(config, staging, cache_dir=tmp_path / "c", session=None)
 
 
+def test_a_dead_cookie_on_an_html_page_stops_the_harvest(app, tmp_path):
+    """The failure that looks like success: HTTP 200, but it is the login page.
+
+    `requires_auth` only proves a session was supplied. A cookie that has since
+    expired sails past it, and every page comes back 200 with the sign-in
+    screen — so without a body check the harvest walks the whole config and
+    stores nothing while reporting no error at all.
+    """
+    stale = Session.from_cookie_header("cv_session=expired", app.url)
+    config = _list_config(app)
+    config.site.requires_auth = True
+
+    with Staging(tmp_path / "s.sqlite") as staging:
+        with pytest.raises(AuthExpired, match="sign-in page"):
+            harvest(config, staging, cache_dir=tmp_path / "c", session=stale)
+
+
+def test_a_valid_session_is_never_mistaken_for_a_login_page(app, session, tmp_path):
+    """The guard must not fire on a healthy harvest — no false positives."""
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(_list_config(app), staging, cache_dir=tmp_path / "c",
+                         session=session)
+
+    assert report.total_stored == 5
+
+
 # --- the authenticated API --------------------------------------------------
 
 

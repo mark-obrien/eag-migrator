@@ -1294,7 +1294,31 @@ def create_app() -> FastAPI:
             for collection in report.collections:
                 for item in collection.scrubbed.summary():
                     job.say(f"  {collection.name}: {item}")
+
+            # Why a collection landed nothing is the whole diagnosis, and the
+            # report already holds it — a bare "stored 0" gives no way to tell
+            # a wrong selector from a wrong URL from a dead session.
+            for collection in report.collections:
+                if collection.stored or not collection.discovered:
+                    continue
+                job.say(
+                    f"  {collection.name}: stored 0 of {collection.discovered} "
+                    f"discovered ({collection.fetched} fetched, "
+                    f"{collection.failed} failed)"
+                )
+                for note in collection.notes[:3]:
+                    job.say(f"      {note}")
+                for err in collection.errors[:3]:
+                    job.say(f"      {err['url']} → {err['error']}")
+
             job.say(f"stored {report.total_stored:,} record(s)")
+            if not report.total_stored:
+                job.say(
+                    "nothing landed. Pages were fetched but no record came out "
+                    "of them, so either the session is not valid (every page is "
+                    "the login screen) or the selectors do not match this site's "
+                    "markup. Full detail in reports/harvest.md."
+                )
             # A real harvest is now the v2 source — drop any sample override.
             override = _v2_source_override()
             if override.exists():
