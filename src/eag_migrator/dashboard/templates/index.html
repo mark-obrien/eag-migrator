@@ -229,58 +229,7 @@
       {% endif %}
 
       <div class="sub">
-        <h3>a · Find the data</h3>
-        <form method="post" action="/actions/recon{{ q }}">
-          <label style="margin-top:0">Recon — what is this app, and is it behind a login?</label>
-          <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-          <div class="actions"><button>Recon</button></div>
-        </form>
-
-        <form method="post" action="/actions/capture{{ q }}" style="margin-top:14px">
-          <label>Capture — record the JSON API it calls (needs a browser)</label>
-          <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
-          <label>Pages to drive, one per line</label>
-          <textarea name="paths" rows="3">/customers
-/quotes
-/schedule</textarea>
-          <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
-            <input type="checkbox" name="explore" value="1" style="width:auto">
-            Follow the app's own navigation to find more screens
-          </label>
-          <div class="muted">Never follows a state change — delete, refund, send, log
-            out — and reports what it left alone.</div>
-          <div class="actions">
-            <button {% if not s.browser.available %}disabled title="this image has no browser"{% endif %}>Capture</button>
-          </div>
-        </form>
-
-        <form method="post" action="/actions/draft-html{{ q }}" style="margin-top:14px">
-          <label>Draft from HTML — for a server-rendered v2 with no API</label>
-          <input type="text" name="url" placeholder="https://shop.everythingautoglass.com/customers" required>
-          <label>More list screens, one per line</label>
-          <textarea name="paths" rows="2" placeholder="/quotes
-/invoices"></textarea>
-          <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
-            <input type="checkbox" name="assist" value="1" style="width:auto"
-                   {% if not s.assist.available %}disabled{% endif %}>
-            Let a model read the structure too
-          </label>
-          <div class="muted">
-            {%- if s.assist.available %}
-              One call per screen, never per record. Values are stripped before the
-              request — the model sees <code>&lt;td class="email"&gt;EMAIL&lt;/td&gt;</code>,
-              not an address — and its selectors are run against the page before use.
-            {%- else %}
-              Needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>. Without it,
-              the built-in heuristics are used.
-            {%- endif %}
-          </div>
-          <div class="actions"><button>Draft from HTML</button></div>
-        </form>
-      </div>
-
-      <div class="sub">
-        <h3>b · Choose the config, then harvest</h3>
+        <h3>a · Choose the config, then harvest</h3>
         {% if s.harvest.present and s.harvest.valid %}
           <div class="row"><span class="k">live config</span>
             <span class="ok">{{ s.harvest.base_url }}</span></div>
@@ -329,7 +278,7 @@
       </div>
 
       <div class="sub">
-        <h3>c · What landed</h3>
+        <h3>b · What landed</h3>
         {% if staged %}
           {% for t in s.staging.tables %}
             <div class="row">
@@ -356,6 +305,70 @@
           </form>
         </details>
       </div>
+
+      <details style="margin-top:6px">
+        <summary class="muted">Starting a new shop? Discover the site first</summary>
+        <div class="sub" style="margin-top:10px">
+          <p class="muted">These build a harvest config from scratch, for a v2 you
+            haven't mapped yet. Zephyr already has one
+            (<span class="mono">harvest.eag-v2.yaml</span>), so for Zephyr skip
+            straight to “Choose the config” above.</p>
+
+          <form method="post" action="/actions/recon{{ q }}">
+            <label style="margin-top:0">Recon — what is this app, and is it behind a login?</label>
+            <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+            <div class="actions"><button>Recon</button></div>
+          </form>
+
+          <form method="post" action="/actions/draft-html{{ q }}" style="margin-top:14px">
+            <label>Draft from HTML — for a server-rendered v2 with no API</label>
+            <input type="text" name="url" placeholder="https://shop.everythingautoglass.com/customers" required>
+            <label>More list screens, one per line</label>
+            <textarea name="paths" rows="2" placeholder="/quotes
+/invoices"></textarea>
+            <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
+              <input type="checkbox" name="assist" value="1" style="width:auto"
+                     {% if not s.assist.available %}disabled{% endif %}>
+              Let a model read the structure too
+            </label>
+            <div class="muted">
+              {%- if s.assist.available %}
+                One call per screen, never per record. Values are stripped before the
+                request — the model sees <code>&lt;td class="email"&gt;EMAIL&lt;/td&gt;</code>,
+                not an address — and its selectors are run against the page before use.
+              {%- else %}
+                Needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>. Without it,
+                the built-in heuristics are used.
+              {%- endif %}
+            </div>
+            <div class="actions"><button>Draft from HTML</button></div>
+          </form>
+
+          <details style="margin-top:14px">
+            <summary class="muted">Capture a JSON API (needs a browser)</summary>
+            <div class="note" style="margin-top:8px">Only for a shop whose v2 has a
+              JSON API. Zephyr's v2 does not — it is server-rendered HTML, so use
+              “Draft from HTML” above. Kept for the next shop.</div>
+            <form method="post" action="/actions/capture{{ q }}" style="margin-top:10px">
+              <label style="margin-top:0">Capture — record the JSON API it calls</label>
+              <input type="text" name="url" placeholder="https://shop.everythingautoglass.com" required>
+              <label>Pages to drive, one per line</label>
+              <textarea name="paths" rows="3">/customers
+/quotes
+/schedule</textarea>
+              <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
+                <input type="checkbox" name="explore" value="1" style="width:auto">
+                Follow the app's own navigation to find more screens
+              </label>
+              <div class="muted">Never follows a state change — delete, refund, send,
+                log out — and reports what it left alone.</div>
+              <div class="actions">
+                <button {% if not s.browser.available %}disabled title="this image has no browser"{% endif %}>Capture</button>
+              </div>
+            </form>
+          </details>
+        </div>
+      </details>
     </section>
 
     <!-- Panel 3 — Connect to v3 ---------------------------------------- -->
