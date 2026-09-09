@@ -984,7 +984,7 @@ def test_overview_reads_as_a_numbered_pipeline(client):
     assert "not connected" in page
 
 
-def test_the_status_strip_tracks_what_is_ready(client, workspace):
+def test_the_step_rail_tracks_what_is_ready(client, workspace):
     from eag_migrator.web.session import Session
 
     Session.from_cookie_header("sid=x", "https://v2.example").save(dash.SESSION_FILE)
@@ -995,8 +995,8 @@ def test_the_status_strip_tracks_what_is_ready(client, workspace):
         "INSERT INTO customers VALUES (1, 'Dana'), (2, 'Sam');"
     )
     page = client.get("/").text
-    assert "v2 ready" in page          # a session counts as reachable
-    assert "2 rows staged" in page
+    assert "signed in" in page          # step 1's state, off a session
+    assert "2 rows staged" in page      # step 2's state
 
 
 def test_harvest_is_gated_on_a_live_config(client, workspace):
@@ -1107,10 +1107,10 @@ def test_load_sample_seeds_data_a_mapping_and_points_the_source(workspace, clien
 
 def test_the_guide_shows_the_next_step(client):
     page = client.get("/").text
-    assert "How to run the migration" in page
-    assert "Next:" in page
-    # With nothing configured, the first step is connecting to v2.
-    assert "Connect to v2 below" in page
+    assert "How to run the migration" in page       # the collapsible reference
+    assert "Next" in page                           # the current-step hint
+    # With nothing configured, the first step is signing in to v2.
+    assert "Sign in to v2 to start" in page
 
 
 def test_web_only_makes_both_sides_ready_without_a_database(workspace, client, monkeypatch):
@@ -1123,9 +1123,11 @@ def test_web_only_makes_both_sides_ready_without_a_database(workspace, client, m
     Session.from_cookie_header("v3=1", "https://v3.example").save(dash.V3_SESSION_FILE)
 
     page = client.get("/").text
-    # The status strip shows both ready off a session and an API connection.
-    assert "v2 ready" in page
-    assert "v3 ready" in page
+    # Both connect steps show as done off a session and an API connection.
+    assert "signed in" in page                       # v2 step state
+    assert "connected" in page                       # v3 step state
+    # Both steps carry the done marker.
+    assert page.count("class=\"marker\">✓") >= 2
     # The database options are present but tucked behind a disclosure.
     assert "Have a v2 database instead?" in page
     assert "Have a v3 database instead?" in page
