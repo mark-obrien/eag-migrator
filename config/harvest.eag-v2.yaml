@@ -559,11 +559,23 @@ collections:
         as: customer_id
     extract:
       type: html
-      rows: "#tab-job .nags-row:not(.nags-header-row)"
+      # A customer with no jobs still renders one .nags-row — the "There are no
+      # Jobs assigned to this customer" message — and the only thing marking it
+      # is that its single cell carries .full-width. Excluding the header row
+      # is not enough: on the first full run 949 of the 965 rows harvested here
+      # were that message, and `require: [customer_id]` cannot reject them
+      # because customer_id is the carry value and is always set.
+      rows: "#tab-job .nags-row:not(.nags-header-row):not(:has(.nags-column.full-width))"
       require: [customer_id]
       fields:
         - to: vehicle
           selector: ".nags-column:nth-of-type(1)"
+        # ALWAYS EMPTY — the column exists and is headed "Part Number", but the
+        # app never populates it: 0 of 965 harvested rows had a value. The
+        # selector is correct; the data is simply not in this response. This
+        # matters, because the join described at the end of this file was to be
+        # made on vehicle + part_number + created. Read that note before using
+        # this field for anything.
         - to: part_number
           selector: ".nags-column:nth-of-type(2)"
         - to: created
@@ -580,11 +592,16 @@ collections:
         as: customer_id
     extract:
       type: html
-      rows: "#tab-quotes .nags-row:not(.nags-header-row)"
+      # Same empty-state row as customer_jobs above — 951 of the 961 rows
+      # harvested on the first full run were "There are no Quotes assigned to
+      # this customer".
+      rows: "#tab-quotes .nags-row:not(.nags-header-row):not(:has(.nags-column.full-width))"
       require: [customer_id]
       fields:
         - to: vehicle
           selector: ".nags-column:nth-of-type(1)"
+        # ALWAYS EMPTY, like part_number on the jobs tab: the "Sent" column is
+        # rendered but never filled — 0 of 961 rows had a value.
         - to: sent
           selector: ".nags-column:nth-of-type(2)"
         - to: total_due
@@ -627,16 +644,41 @@ collections:
 # no customer id, and /customer/jobquotesmodal/{id} — which knows perfectly
 # well which jobs are whose — renders them with no ids at all.
 #
-# But that endpoint is still the answer. It is the server telling us which
-# jobs belong to customer 794, and the `customer_jobs` collection above
-# captures exactly that. Each row gives (customer_id, vehicle, part_number,
-# created, stage), and every one of those four also appears on the job. So
-# the link is rebuilt by matching customer_jobs against jobs on
+# That endpoint was going to be the answer: the server telling us which jobs
+# belong to customer 794, captured by the `customer_jobs` collection above.
+# The plan was to rebuild the link by matching customer_jobs against jobs on
 #
 #     vehicle + part_number + created
 #
-# which is far stronger than any name match, because it is the application's
-# own assertion of membership rather than an inference about people.
+# THE FIRST FULL RUN BROKE THAT PLAN, IN TWO WAYS. Both were measured, not
+# guessed, and neither is worked around anywhere in this file — they are a
+# decision for a person, which is why they are written down rather than fixed.
+#
+#   1. part_number is never populated. The modal renders the column and leaves
+#      it blank on every row — 0 of 965. So the composite that actually exists
+#      is vehicle + created, which no longer distinguishes two jobs for one
+#      customer on the same day, nor two customers who each had a 2015 Toyota
+#      4Runner done on the same date.
+#
+#   2. The endpoint covers almost nothing. Of 961 customers, 12 had any jobs
+#      listed at all, totalling 16 rows — against 626 jobs harvested. It was
+#      checked directly rather than inferred: customers who demonstrably have
+#      a job (matched by name against the job's own denormalised fields) still
+#      return an empty jobs tab. It appears to list only completed work.
+#
+# So this endpoint can authoritatively link about 2% of the jobs, and the
+# other ~98% have no server-asserted owner anywhere in v2. The fallbacks below
+# are therefore not a long stop — they are the main path, and that changes the
+# risk of this migration rather than just its effort.
+#
+# DO NOT let the tool guess its way through that. Options worth weighing
+# before any of it is written to v3:
+#   * Migrate jobs with their customer fields denormalised, exactly as v2
+#     holds them, and do not synthesise a customer link at all.
+#   * Ask whether v2's operator can export the real foreign key — the
+#     application clearly has it, even though no screen exposes it.
+#   * Match on the fallbacks below, migrate only the unambiguous ones, and
+#     hand the rest to a person as a worklist.
 #
 # Do not match on name. 740 customers in one town will contain repeated
 # names, and a wrong link is silent — the job simply belongs to the wrong
