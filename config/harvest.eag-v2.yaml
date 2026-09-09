@@ -1,8 +1,20 @@
 # EAG v2 — harvest config.
 #
-# Written from a survey of the live app, not from a run against it. Every
-# selector here came from real markup, but nothing has been executed yet:
-# treat the first `eagm harvest --limit 2` as the thing that proves it.
+# Originally written from a survey of the live app. It has since been RUN
+# against it, and the run corrected four things the survey got wrong — each
+# one is documented at the collection it affects:
+#
+#   * job_parts matched nothing: `div.part-numbers > div.part-number` is not a
+#     direct-child relationship in the real markup (two wrappers sit between).
+#   * jobs/job_parts/job_notes had `stop: 600`, but real job ids already ran to
+#     750 — a full run would have silently dropped everything above 600.
+#   * job_parts stored a phantom row on jobs with nothing ordered yet, because
+#     `require: [job_id]` cannot reject the empty part template.
+#   * job_payments' fields (div.refund-external, dl.more-info) did not exist.
+#
+# Note that customers/quotes/users/purchase_orders/jobs_board all worked
+# unchanged — a first run that stores 0 everywhere is far more likely to be an
+# expired session than a wrong config. Check the session before the selectors.
 #
 #   cp config/harvest.eag-v2.yaml config/harvest.yaml
 #   eagm login <url>            # or set EAGM_COOKIE in .env
@@ -228,13 +240,16 @@ collections:
       sequence:
         url: /job/manage/{n}
         start: 1
-        stop: 600
-        # 572 is the confirmed ceiling: 571 and 572 exist, 573 is the first
-        # miss, and 600/700/800/900 all return the blank shell. Quotes share
-        # the sequence. The budget must still exceed the largest run of blanks
-        # *inside* the range — the board showed ids from 114, so a leading gap
-        # of 113 is possible and a smaller budget would stop before the first
-        # real job.
+        # No `stop:` on purpose. A hard ceiling goes stale the moment the shop
+        # books another job: the survey recorded 572 as the last id, and by the
+        # first real run the board already showed 750 — a `stop: 600` would
+        # have silently dropped every job from 601 up, with nothing in the
+        # report to say so. The end is found by walking until the blanks add
+        # up, which keeps working as ids grow. site.max_pages still bounds it.
+        #
+        # The budget must exceed the largest run of blanks *inside* the range —
+        # the board showed ids from 114, so a leading gap of 113 is possible
+        # and a smaller budget would stop before the first real job.
         stop_after_misses: 300
     extract:
       type: html
@@ -325,13 +340,23 @@ collections:
       sequence:
         url: /job/manage/{n}
         start: 1
-        stop: 600
+        # See the jobs collection above for why there is no `stop:`.
         stop_after_misses: 300
     extract:
       type: html
-      rows: "div.part-numbers > div.part-number"
-      # A part with no job to hang off is not worth storing.
-      require: [job_id]
+      # NOT `div.part-numbers > div.part-number`. The real markup puts two
+      # wrappers in between — div.accordion.sortable, then a <section> — so the
+      # direct-child combinator matched nothing on every job, which is why this
+      # collection stored 0 on the first run. Descendant, not child.
+      rows: "div.part-numbers div.part-number"
+      # A part needs a job to hang off, and a part number to be a part at all.
+      # `job_id` alone is not enough: it is read from the page rather than the
+      # row, so it is filled even on the empty `div.part-number` template that
+      # a job with nothing ordered yet still renders (job 750 at the time of
+      # writing). That would store a phantom part on every such job. Across the
+      # jobs sampled, every real part had all four part fields populated and
+      # the template had none, so part_number separates them cleanly.
+      require: [job_id, part_number]
       fields:
         # `page` reads the document rather than the row — the job's id is in
         # the page header, outside every part block.
@@ -359,7 +384,7 @@ collections:
       sequence:
         url: /job/manage/{n}
         start: 1
-        stop: 600
+        # See the jobs collection above for why there is no `stop:`.
         stop_after_misses: 300
     extract:
       type: html
@@ -471,28 +496,35 @@ collections:
         as: job_id
     extract:
       type: html
+      # Confirmed: the endpoint answers a bare <tr> with no table around it,
+      # and lxml wraps it such that `tr` matches. A job with no payments
+      # answers 0 bytes, so it contributes no rows at all.
       rows: "tr"
-      require: [job_id]
+      # job_id is the carry value and is therefore always set — it cannot tell
+      # a real payment from a placeholder row. The amount can.
+      require: [job_id, amount]
       fields:
+        - to: amount
+          selector: "td.amount"
+        - to: paid_at
+          selector: "td:nth-of-type(2)"
         - to: status
           selector: "span.badge"
-        - to: processor_ref
-          selector: "div.refund-external"
-          attr: data-payment-id
-        - to: paid_at
-          selector: "dl.more-info dt:-soup-contains('Date') + dd"
-        - to: payment_type
-          selector: "dl.more-info dt:-soup-contains('Payment Type') + dd"
-        - to: source
-          selector: "dl.more-info dt:-soup-contains('Source') + dd"
+        - to: processor
+          selector: "td.payment-processor"
+        # The last cell carries an info icon as well as its text, so read the
+        # cell's own text and ignore the <i>.
         - to: description
-          selector: "dl.more-info dt:-soup-contains('Description') + dd"
+          selector: "td:nth-of-type(6)"
+          attr: own_text
     note: >-
-      TODO: the fragment is table cells with no wrapper, so `rows: tr` is a
-      guess at how lxml wraps it — check the first run's samples and correct
-      it. The amount and date are bare text cells with no class, so they need
-      nth-of-type positions confirmed against a real response. Do not migrate
-      the Stripe charge id into v3 without deciding it belongs there.
+      Rewritten against a real response. The previous selectors
+      (div.refund-external, dl.more-info dt/dd) do not exist in the fragment —
+      they were guesses and matched nothing. No cardholder data appears here,
+      and there is no data-payment-id either, so the Stripe charge id this
+      file used to warn about is not in this response at all. CAVEAT: only one
+      paying job was available to read when these were written, so confirm the
+      cell positions against the samples in the first full run's report.
 
   # --- Which jobs belong to which customer --------------------------------
   # The app will not give us a foreign key, but it will answer the question:

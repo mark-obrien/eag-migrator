@@ -26,6 +26,14 @@
 /config/mapping.draft.yaml
 /config/harvest.draft.yaml
 
+# The live configs are promoted from one of the tracked configs at run time,
+# and the previous one is kept alongside as .bak. Runtime state, not source —
+# committing them would pin whichever shop was migrated last.
+/config/harvest.yaml
+/config/harvest.yaml.bak
+/config/mapping.yaml
+/config/mapping.yaml.bak
+
 # Python
 __pycache__/
 *.py[cod]
