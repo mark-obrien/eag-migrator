@@ -648,6 +648,7 @@ def _harvest_collection(
         columns.append(carry)
     staging.ensure_table(collection.name, columns)
     rows: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
     parent_of: dict[str, str] = {}
     urls: list[str] = []
 
@@ -814,25 +815,46 @@ def _harvest_collection(
             else:
                 guard.check(resp.text, resp.url)
 
+        finalised = [
+            _finalise(extracted, collection, url, result.scrubbed, position)
+            for position, extracted in enumerate(found)
+        ]
+
         if miss_budget:
-            if found:
+            # Records already collected are not progress. Asked for a page past
+            # the end, some apps wrap around to page 1 rather than answering
+            # with nothing — so the empty page that would end the walk never
+            # arrives, and the counter runs to max_pages re-reading the same
+            # records. (EAG v2 does exactly this: /order/searchOrder?currentPage=5
+            # of 4 serves page 1 again, complete with a "Page 1 of 4" label.)
+            #
+            # Compared on content rather than on _key, because a wrapped page
+            # has a URL of its own and a URL-derived key would look new every
+            # time.
+            signatures = [_signature(row) for row in finalised]
+            # Membership is tested before `seen` is updated, so a page that
+            # genuinely repeats a record within itself — two identical parts on
+            # one job — keeps both. Only a repeat of an *earlier* page is dropped.
+            keep = [row for row, sig in zip(finalised, signatures) if sig not in seen]
+            seen.update(signatures)
+            if keep:
                 misses = 0
             else:
                 misses += 1
                 if misses >= miss_budget:
                     result.discovered = i
                     result.notes.append(
-                        f"stopped at {url} after {misses} in a row with nothing on "
-                        f"them — raise stop_after_misses if the gap was real"
+                        f"stopped at {url} after {misses} in a row with nothing "
+                        f"new on them — raise stop_after_misses if the gap was real"
                     )
                     break
+        else:
+            keep = finalised
 
-        for position, extracted in enumerate(found):
-            rows.append(
-                _finalise(extracted, collection, url, result.scrubbed, position)
-            )
+        for row in keep:
+            rows.append(row)
             if len(result.samples) < 3:
-                result.samples.append(dict(rows[-1]))
+                result.samples.append(dict(row))
 
     say(collection.name, result.fetched, result.discovered)
     result.stored = staging.insert(collection.name, columns, rows)
@@ -840,6 +862,22 @@ def _harvest_collection(
 
 
 CANONICAL_URL_FIELDS = ("link", "permalink", "url", "guid", "canonical_url")
+
+# Added by _finalise rather than read off the page: where a record was fetched
+# and when. The same record served from two page numbers differs in all three,
+# so none of them can help decide whether it has been collected already.
+_VOLATILE_FIELDS = ("_url", "_key", "_fetched_at")
+
+
+def _signature(row: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """What a record says, independent of where and when it was read."""
+    return tuple(
+        sorted(
+            (key, str(value))
+            for key, value in row.items()
+            if key not in _VOLATILE_FIELDS
+        )
+    )
 
 
 def _finalise(

@@ -319,6 +319,22 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # Page numbers, but asked for one past the end this serves page 1 again
+        # instead of an empty page — which is what EAG v2's order search does.
+        # A walk looking for "no rows" would never find it here.
+        if path.startswith("/wrap/customers"):
+            tail = path[len("/wrap/customers"):].strip("/")
+            page = int(tail) if tail.isdigit() else 1
+            last = max(1, -(-len(CUSTOMERS) // LIST_PAGE_SIZE))
+            if not 1 <= page <= last:
+                page = 1
+            chunk = CUSTOMERS[(page - 1) * LIST_PAGE_SIZE:][:LIST_PAGE_SIZE]
+            self._send(LIST_HTML % {
+                "rows": "\n".join(LIST_ROW % c for c in chunk),
+                "pager": "",
+            })
+            return
+
         # A per-customer fetch, keyed on a customer id that is nowhere near a
         # contiguous range. It lists the customer's jobs — and, like the real
         # thing, the rows carry no job ids at all.

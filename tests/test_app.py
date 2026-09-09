@@ -454,6 +454,30 @@ def test_the_walk_stops_itself_rather_than_running_to_the_cap(app, session, tmp_
     assert any("stopped at" in n for n in collection.notes)
 
 
+def test_a_page_that_wraps_round_to_the_first_one_still_ends_the_walk(
+    app, session, tmp_path
+):
+    """Past the last page, some apps serve page 1 again instead of nothing.
+
+    EAG v2's order search does exactly this: ?currentPage=5 of 4 answers with
+    page 1's rows and a "Page 1 of 4" label. Waiting for an empty page never
+    ends, so the walk has to notice it is being handed records it already has.
+    """
+    config = _sequence_config(
+        app, url="/wrap/customers/{n}", start=1, step=1, stop_after_misses=2
+    )
+    config.site.max_pages = 50
+
+    with Staging(tmp_path / "s.sqlite") as staging:
+        report = harvest(config, staging, cache_dir=tmp_path / "c", session=session)
+
+    collection = report.collections[0]
+    # 3 real pages, then 2 wrapped ones to prove the end. Not 50.
+    assert collection.fetched == 5
+    assert report.total_stored == 5
+    assert any("nothing new" in n for n in collection.notes)
+
+
 def test_a_gap_in_the_ids_is_not_the_end_of_the_data(app, session, tmp_path):
     """Ids are sparse wherever a record was deleted. One miss is a hole."""
     config = HarvestConfig.model_validate(
@@ -559,14 +583,25 @@ def test_a_blank_shell_answering_200_is_not_stored_as_a_record(app, session, tmp
     assert all(r["first_name"] for r in rows)
 
 
-def test_without_require_the_blank_shells_would_all_be_stored(app, session, tmp_path):
-    """The premise of the test above, stated rather than assumed."""
+def test_without_require_the_blank_shells_are_stored_and_end_the_walk(
+    app, session, tmp_path
+):
+    """The premise of the test above, stated rather than assumed.
+
+    Without `require` a blank shell is a record like any other, so the first
+    one is stored. Every shell after it is byte-identical, which the walk reads
+    as no progress — so it stops. That is a second reason to set `require`
+    rather than a substitute for it: on a config whose real ids sit *beyond* a
+    run of blanks, this would end the harvest before ever reaching them.
+    """
     config = _detail_config(app, require=[])
     with Staging(tmp_path / "s.sqlite") as staging:
         report = harvest(config, staging, cache_dir=tmp_path / "c", session=session)
 
-    assert report.total_stored == 21                   # every id in the range
-    assert report.collections[0].fetched == 21         # and it never stopped early
+    collection = report.collections[0]
+    assert report.total_stored == 4              # 3 real jobs, plus one blank shell
+    assert collection.fetched < 21               # the identical blanks ended it early
+    assert any("nothing new" in n for n in collection.notes)
 
 
 def test_a_child_row_reaches_the_page_for_its_parents_id(app, session, tmp_path):

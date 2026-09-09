@@ -178,8 +178,15 @@ collections:
         - to: job
           selector: "td:nth-of-type(8)"
     note: >-
-      "Page 1 of 41" at the time of the survey. No stop is set so it finds the
-      end itself.
+      WRAPS AROUND. Asking for a page past the last one does not return an
+      empty page — the server serves page 1 again, labelled "Page 1 of 4". So
+      there is no empty page to stop on, and before the harvester learned to
+      notice repeated records this walked to max_pages (5,000 requests) instead
+      of stopping at 6. No stop is set; the end is found by walking.
+      COUNT TO CHECK: the first real run found 4 pages of 50 — 194 orders — but
+      the survey recorded "Page 1 of 41". Even at the old 25-a-page assumption
+      that is ~1,000 orders, so either a lot were purged or the survey misread
+      it. Worth confirming against the app before trusting 194 as complete.
 
   # --- Jobs board: a dashboard, not a complete list -----------------------
   # Eight tables on one page, one per status group, all table.defaultTbl
