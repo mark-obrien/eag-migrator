@@ -1058,6 +1058,31 @@ def harvest(
     raise typer.Exit(1 if report.total_failed else 0)
 
 
+@app.command(name="reset-staging")
+def reset_staging_cmd(
+    cache: bool = typer.Option(
+        False, "--cache", help="Also clear the HTTP cache, to re-fetch v2 fresh"
+    ),
+) -> None:
+    """Clear the harvested v2 data so it can be re-scraped from scratch.
+
+    Local only — this never touches the live v2 site, which the tool only reads.
+    """
+    _settings()
+    from .web.staging import reset_staging
+
+    removed = reset_staging(STAGING_DB, WEB_CACHE if cache else None)
+    if removed["staging"]:
+        console.print(f"[green]Cleared staging[/green] ({STAGING_DB})")
+    else:
+        console.print("[dim]No staging database to clear.[/dim]")
+    if cache:
+        console.print(
+            "[green]Cleared the HTTP cache[/green] — the next harvest fetches v2 fresh."
+            if removed["cache"] else "[dim]No HTTP cache to clear.[/dim]"
+        )
+
+
 @app.command()
 def staging(
     sample: int = typer.Option(0, help="Show N sample rows per collection"),

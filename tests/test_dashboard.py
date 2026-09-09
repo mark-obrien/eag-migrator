@@ -1131,3 +1131,34 @@ def test_web_only_makes_both_sides_ready_without_a_database(workspace, client, m
     # The database options are present but tucked behind a disclosure.
     assert "Have a v2 database instead?" in page
     assert "Have a v3 database instead?" in page
+
+
+def test_reset_staging_clears_harvested_data_from_the_dashboard(workspace, client):
+    """Resetting v2 data wipes the local staging DB, leaving the live site alone."""
+    import sqlite3
+
+    dash.STAGING_DB.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(dash.STAGING_DB).executescript(
+        "CREATE TABLE customers(_id INTEGER PRIMARY KEY, name TEXT);"
+        "INSERT INTO customers VALUES (1, 'Dana');"
+    )
+    dash.WEB_CACHE.mkdir(parents=True, exist_ok=True)
+    (dash.WEB_CACHE / "page.html").write_text("cached")
+
+    # Without the checkbox, staging goes but the cache stays.
+    res = client.post("/actions/reset-staging", data={"cache": ""}, follow_redirects=False)
+    assert res.status_code == 303
+    assert not dash.STAGING_DB.exists()
+    assert dash.WEB_CACHE.exists()
+
+    # With it, the cache goes too — a genuine fresh re-scrape.
+    sqlite3.connect(dash.STAGING_DB).executescript("CREATE TABLE t(x);")
+    res = client.post("/actions/reset-staging", data={"cache": "1"}, follow_redirects=False)
+    assert not dash.STAGING_DB.exists()
+    assert not dash.WEB_CACHE.exists()
+
+
+def test_the_reset_control_is_offered_in_the_extract_step(client):
+    page = client.get("/").text
+    assert "Reset — start the harvest over" in page
+    assert "never touches the live v2 site" in page

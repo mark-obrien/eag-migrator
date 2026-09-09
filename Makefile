@@ -135,6 +135,10 @@ api-get: ## Read a v3 API endpoint:  make api-get PATH_=/api/V1/pricing-profiles
 staging: ## Show what is in the staging database
 	$(RUN) staging
 
+.PHONY: reset-staging
+reset-staging: ## Clear harvested v2 data to re-scrape (add CACHE=1 to re-fetch fresh)
+	$(RUN) reset-staging $(if $(CACHE),--cache,)
+
 .PHONY: discover
 discover: ## Introspect both databases into profiles/
 	$(RUN) discover --side both

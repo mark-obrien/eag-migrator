@@ -859,6 +859,22 @@ def create_app() -> FastAPI:
             return _back(request, error=f"could not reach the mock: {exc}")
         return _back(request, message="mock records wiped")
 
+    @app.post("/actions/reset-staging", dependencies=[Depends(require_token)])
+    def action_reset_staging(request: Request, cache: str = Form("")) -> Any:
+        """Clear the harvested v2 data so it can be re-scraped. Local only."""
+        from ..web.staging import reset_staging
+
+        removed = reset_staging(STAGING_DB, WEB_CACHE if cache else None)
+        override = _v2_source_override()
+        if override.exists():
+            override.unlink()
+        bits = []
+        if removed["staging"]:
+            bits.append("staging cleared")
+        if removed["cache"]:
+            bits.append("HTTP cache cleared")
+        return _back(request, message=", ".join(bits) or "nothing to clear")
+
     @app.post("/actions/v3-snapshot", dependencies=[Depends(require_token)])
     def action_v3_snapshot(request: Request) -> Any:
         def work(job: Any) -> dict[str, Any]:

@@ -80,6 +80,7 @@ switch ($Task) {
         Write-Host "    draft-html <url> read a list screen's HTML into selectors"
         Write-Host "    harvest          pull it into state/staging.sqlite"
         Write-Host "    staging          show what was harvested"
+        Write-Host "    reset-staging    clear harvested data to re-scrape (--cache to re-fetch)"
         Write-Host ""
         Write-Host "  Talking to v3's API"
         Write-Host "    api-get <path>   read an endpoint (UUIDs, enum codes)"
@@ -159,6 +160,7 @@ switch ($Task) {
     "api-get"  { Require-Argument "an endpoint path"; Invoke-Eagm (@("api-get") + $Rest) }
     "api-post" { Require-Argument "an endpoint path"; Invoke-Eagm (@("api-post") + $Rest) }
     "staging"  { Invoke-Eagm @("staging") }
+    "reset-staging" { Invoke-Eagm (@("reset-staging") + $Rest) }
     "doctor"   { Invoke-Eagm @("doctor") }
     "discover" { Invoke-Eagm @("discover", "--side", "both") }
     "scaffold" { Invoke-Eagm @("scaffold") }

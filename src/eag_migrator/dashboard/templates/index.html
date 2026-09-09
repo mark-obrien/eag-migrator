@@ -342,6 +342,19 @@
         {% else %}
           <p class="muted">Nothing harvested yet.</p>
         {% endif %}
+
+        <details style="margin-top:12px">
+          <summary class="muted">Reset — start the harvest over</summary>
+          <form method="post" action="/actions/reset-staging{{ q }}" style="margin-top:8px">
+            <div class="muted">Clears the harvested data so you can re-scrape from
+              scratch. Local only — it never touches the live v2 site.</div>
+            <label style="display:flex;align-items:center;gap:7px;margin-top:8px">
+              <input type="checkbox" name="cache" value="1" style="width:auto">
+              Also clear the HTTP cache (re-fetch fresh, not cached pages)
+            </label>
+            <div class="actions"><button class="danger">Reset staging</button></div>
+          </form>
+        </details>
       </div>
     </section>
 

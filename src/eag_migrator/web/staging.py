@@ -11,12 +11,31 @@ whole scraped site into a source the existing pipeline already understands.
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 RESERVED = ("_id", "_key", "_url", "_fetched_at")
 SAFE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def reset_staging(db_path: Path, cache_dir: Path | None = None) -> dict[str, bool]:
+    """Throw away harvested v2 data so it can be re-scraped from scratch.
+
+    Only touches local, re-derivable files — never the live v2 site, which this
+    tool only ever reads. Deletes the staging database (and its SQLite
+    sidecars); with `cache_dir`, also clears the HTTP response cache so the next
+    harvest fetches the site fresh rather than replaying cached pages.
+    """
+    removed = {"staging": False, "cache": False}
+    for path in db_path.parent.glob(db_path.name + "*"):
+        path.unlink()
+        removed["staging"] = True
+    if cache_dir and cache_dir.exists():
+        shutil.rmtree(cache_dir)
+        removed["cache"] = True
+    return removed
 
 
 def _check(name: str, what: str) -> str:
