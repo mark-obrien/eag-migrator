@@ -89,21 +89,56 @@ entities:
       - to: isActive
         const: true
 
+      # REQUIRED — v3 answers "CustomerType is required." without it.
+      - to: customerType
+        const: 7
+        note: >-
+          7 is what v3 itself assigned to the customer it auto-created for an
+          individual, and 9 is the tenant's default customer. NEEDS CONFIRMING
+          FOR BUSINESSES: v2 has is_business, but the code v3 uses for a
+          business customer was never observed, so every customer currently
+          goes across as 7 regardless.
+
+      # REQUIRED — v3 answers "Contact list cannot be null." and "At least one
+      # contact is required." A v2 customer is one person, so it becomes one
+      # contact carrying the same name and email.
+      - to: contactList[0].firstName
+        from: first_name
+        transform: [trim, nullif_empty]
+      - to: contactList[0].lastName
+        from: last_name
+        transform: [trim, nullif_empty]
+      - to: contactList[0].emailAddress
+        from: email
+        transform: [trim, email]
+      - to: contactList[0].isBusiness
+        from: is_business
+        transform: [bool]
+      - to: contactList[0].preferredComMethod
+        const: 1
+
       # Phones. v2 keeps phone / alt_phone / fax flat; v3 wants a list.
+      # phoneType is a STRING here — v3 rejects a number with "Cannot get the
+      # value of a token type 'Number' as a string" — and it is not a strict
+      # enum: an invented value was accepted. "Mobile" is what the tenant's own
+      # records hold.
+      # v3 answers "Phone number must contain only digits" to the E.164 that
+      # `phone` produces, and its own records hold ten bare digits.
       - to: phoneList[0].phoneNumber
         from: phone
-        transform: [phone]
+        transform:
+          - phone
+          - digits: {last: 10}
       - to: phoneList[0].phoneType
-        const: 1
-        note: >-
-          UNCONFIRMED enum. 1 is what the tenant's own records use for a
-          primary number; no list of valid phoneType codes was published.
+        const: Mobile
       - to: phoneList[1].phoneNumber
         from: alt_phone
-        transform: [phone]
+        transform:
+          - phone
+          - digits: {last: 10}
       - to: phoneList[1].phoneType
-        const: 2
-        note: UNCONFIRMED enum, as above. An entry with no number is dropped.
+        const: Mobile
+        note: An entry with no number is dropped before the payload is built.
 
       # Mailing address.
       # nullif_empty throughout: v2 stores a missing address as "", and an
@@ -127,9 +162,11 @@ entities:
           - postal_code: {region: US}
       - to: addressList[0].country
         const: US
+      # An INTEGER, not a string: v3 rejects "1" with "The JSON value could not
+      # be converted to App.Domain.Enums.AddressType". 3 and 4 are the values
+      # the tenant's own customer records carry.
       - to: addressList[0].addressType
-        const: 1
-        note: UNCONFIRMED enum.
+        const: 3
 
       # Physical address, where v2 holds one that differs from the mailing one.
       # Customers without it produce an entry of nulls, which is dropped before
@@ -150,8 +187,7 @@ entities:
         from: physical_zip
         transform: [trim, nullif_empty]
       - to: addressList[1].addressType
-        const: 2
-        note: UNCONFIRMED enum.
+        const: 4
     note: >-
       customerType is deliberately not mapped. v2 has is_business, v3 has an
       integer customerType, and the only observed value is 9 on the tenant's
@@ -213,9 +249,11 @@ entities:
         transform: [trim, email]
       - to: customerPhone.phoneNumber
         from: customer_phone
-        transform: [phone]
+        transform:
+          - phone
+          - digits: {last: 10}
       - to: customerPhone.phoneType
-        const: 1
+        const: Mobile
 
       - to: installAddress.address1
         from: customer_address1

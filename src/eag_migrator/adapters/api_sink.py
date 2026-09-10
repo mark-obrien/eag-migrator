@@ -227,6 +227,14 @@ def _find_id(record: Any, preferred: str | None) -> Any:
     """The identifier the target assigned, so the id map can point at it."""
     if isinstance(record, list):
         record = record[0] if len(record) == 1 else None
+    # Some endpoints answer with the new key by itself rather than the record:
+    # v3's POST /api/V1/jobs returns {"data": "01a089eb-8b33-...", "succeeded":
+    # true}, where the customer endpoint returns the whole object. Without this
+    # every job was recorded with no target id, which leaves rollback unable to
+    # delete what it wrote and a re-run unable to tell the job was already
+    # migrated — the exact hole that made the previous import unrecoverable.
+    if isinstance(record, (str, int)) and str(record).strip():
+        return record
     if not isinstance(record, dict):
         return None
     if preferred:

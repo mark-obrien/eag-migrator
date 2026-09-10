@@ -146,3 +146,20 @@ originating v2 id.
 | `tpaId` | str |
 | `url` | null |
 
+
+## What a real POST established
+
+Read-only inspection could not answer these; each came from creating a record
+in the live tenant and deleting it again.
+
+| Finding | Detail |
+|---|---|
+| **A job is accepted with no `customerKey`** | `POST /api/V1/jobs` returns 200 / `succeeded: true`. The denormalised approach works. |
+| **…but v3 then invents a customer** | It creates a customer from the job's `customerFirstName`/`LastName`/`Email`/`Phone` and links it. Posting 626 jobs would therefore create up to 626 customers on top of any migrated separately. |
+| `POST /api/V1/jobs` returns the key alone | `{"data": "01a0…", "succeeded": true}` — a bare string, not the record. The customer endpoint returns the object. |
+| `customerType` is **required** | "CustomerType is required." Observed: `9` on the tenant default, `7` on a customer v3 auto-created for an individual. The code for a business is unknown. |
+| `contactList` is **required** | "Contact list cannot be null." and "At least one contact is required." |
+| `phoneType` is a **string** | A number is refused: "Cannot get the value of a token type 'Number' as a string." Not a strict enum — an invented value was accepted. The tenant's own records use `"Mobile"`. |
+| `addressType` is an **integer** | A string is refused: "The JSON value could not be converted to App.Domain.Enums.AddressType". Customers use `3` and `4`; job addresses use `0`. |
+| Phone numbers must be **bare digits** | "Phone number must contain only digits." E.164 is refused; v3's own records hold ten digits. |
+| A 422 can still leave a record behind | A customer rejected for a bad phone number was found in the tenant afterwards, so validation does not look fully transactional. Check after a failed run rather than assuming nothing was written. |

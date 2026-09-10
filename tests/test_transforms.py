@@ -28,6 +28,22 @@ def test_phone_normalises_to_e164():
     assert chain("1-555-123-4567", ["phone"]) == "+15551234567"
 
 
+def test_digits_strips_everything_that_is_not_a_number():
+    assert chain("(555) 123-4567", ["digits"]) == "5551234567"
+    assert chain("+1 555 123 4567", ["digits"]) == "15551234567"
+    assert chain(None, ["digits"]) is None
+    assert chain("no digits here", ["digits"]) is None
+
+
+def test_digits_can_keep_just_the_last_n():
+    """v3 refuses E.164 — "Phone number must contain only digits" — and holds
+    ten bare digits, so the country code `phone` adds has to come back off."""
+    assert chain("(555) 123-4567", ["phone", {"digits": {"last": 10}}]) == "5551234567"
+    assert chain("1-555-123-4567", ["phone", {"digits": {"last": 10}}]) == "5551234567"
+    # Shorter than the window is left whole rather than padded or refused.
+    assert chain("12345", ["digits", {"digits": {"last": 10}}]) == "12345"
+
+
 def test_vin_uppercases_and_strips_separators():
     assert chain("5NPE24AF1FH-012345", ["vin"]) == "5NPE24AF1FH012345"
 

@@ -326,6 +326,25 @@ def _phone(value: Any, *, region: str = "US", **_: Any) -> Any:
     return f"+{digits}" if len(digits) > 10 else str(value).strip()
 
 
+@transform("digits")
+def _digits(value: Any, *, last: int = 0, **_: Any) -> Any:
+    """Keep only the digits, optionally just the last N.
+
+    Some targets will not take a formatted number: v3 answers "Phone number
+    must contain only digits" and stores ten bare digits, so the E.164 that
+    `phone` produces has to have its "+" and country code taken back off.
+    Chain them — `[phone, {digits: {last: 10}}]` — so the number is normalised
+    first and then reduced, rather than digits being scraped off whatever
+    punctuation the source happened to use.
+    """
+    if value is None:
+        return None
+    kept = re.sub(r"\D", "", str(value))
+    if not kept:
+        return None
+    return kept[-last:] if last and len(kept) > last else kept
+
+
 @transform("email")
 def _email(value: Any, *, strict: bool = False, **_: Any) -> Any:
     """Trim, lowercase and sanity-check an address; NULL if implausible."""

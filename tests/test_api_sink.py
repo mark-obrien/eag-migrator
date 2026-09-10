@@ -119,6 +119,20 @@ def test_the_envelopes_data_is_where_the_id_comes_from(api):
     assert results[0].target_id == "019fca0c-1111-7000-8000-000000000001"
 
 
+def test_an_envelope_whose_data_is_just_the_new_key_still_yields_an_id(api):
+    """v3's POST /api/V1/jobs answers {"data": "<uuid>"} — the key alone.
+
+    Reading no id from that leaves the id map empty, so rollback cannot delete
+    what the run wrote and a re-run cannot tell the row was already migrated.
+    """
+    REPLY["body"] = {"data": "01a089eb-8b33-76c8-b97e-90fac9aca4a5",
+                     "messages": [], "succeeded": True}
+    results = _write(api)
+
+    assert results[0].action == "inserted"
+    assert results[0].target_id == "01a089eb-8b33-76c8-b97e-90fac9aca4a5"
+
+
 def test_an_unenveloped_body_is_taken_at_face_value(api):
     REPLY["body"] = {"id": 4242}
     results = _write(api)
