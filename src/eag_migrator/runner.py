@@ -420,6 +420,18 @@ class Runner:
             return out
 
         for batch in stream:
+            # `limit` is the safety valve for a cautious first run, so it has
+            # to hold inside a batch, not just between batches. Checking only
+            # after each batch had committed meant `--limit 10` wrote a full
+            # 500-row batch to production before it noticed. The batch is cut
+            # to what is left of the budget BEFORE anything is built or sent,
+            # and the checkpoint key is taken from the last row actually
+            # processed, not the last row fetched.
+            if limit:
+                remaining = limit - out.processed
+                if remaining <= 0:
+                    break
+                batch = batch[:remaining]
             prepared: list[tuple[Any, dict[str, Any]]] = []
             last_key = batch[-1][entity.source.sort_column]
 
@@ -568,16 +580,25 @@ class Runner:
         if run["mode"] != "apply":
             raise ValueError(f"run {run_id} was a {run['mode']} run — nothing was written")
 
+        # The sink needs the entity's real endpoint to undo against. An API
+        # sink that has to guess falls back to `/<table>`, and on a host whose
+        # front end answers every unknown path with 200, a DELETE to the wrong
+        # URL looks like a success while removing nothing.
+        endpoints = {e.name: e.target.endpoint for e in self.mapping.entities}
+
         grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        undoable = 0
         for row in self.state.journal_entries_desc(run_id):
             key = (row["entity"], row["target_table"], row["target_key"])
-            grouped.setdefault(key, []).append(
-                {
-                    "target_id": row["target_id"],
-                    "action": row["action"],
-                    "prior_row": _load_json(row["prior_row"]),
-                }
-            )
+            entry = {
+                "target_id": row["target_id"],
+                "action": row["action"],
+                "prior_row": _load_json(row["prior_row"]),
+                "endpoint": endpoints.get(row["entity"]),
+            }
+            grouped.setdefault(key, []).append(entry)
+            if row["action"] in ("inserted", "updated") and row["target_id"] not in (None, "", "None"):
+                undoable += 1
 
         undone = 0
         details: list[dict[str, Any]] = []
@@ -591,10 +612,27 @@ class Runner:
             undone += count
             details.append({"entity": entity_name, "table": table, "rows_undone": count})
 
-        self.state.forget_ids(run_id)
-        self.state.clear_journal(run_id)
-        self.state.finish_run(run_id, "rolled_back")
-        return {"run_id": run_id, "rows_undone": undone, "detail": details}
+        # The journal and the id map are the only record of what a run put in
+        # the target. They are cleared ONLY once the target has actually given
+        # all of it back. Clearing them regardless — as this used to — turned
+        # a rollback that undid nothing into one that also destroyed the
+        # evidence, leaving 966 rows in production with no local record of
+        # which they were.
+        complete = undoable > 0 and undone >= undoable
+        if complete:
+            self.state.forget_ids(run_id)
+            self.state.clear_journal(run_id)
+            self.state.finish_run(run_id, "rolled_back")
+        else:
+            self.state.finish_run(run_id, "rollback_incomplete")
+        return {
+            "run_id": run_id,
+            "rows_undone": undone,
+            "rows_journalled": undoable,
+            "complete": complete,
+            "evidence_kept": not complete,
+            "detail": details,
+        }
 
 
 # --- nested target paths ------------------------------------------------------

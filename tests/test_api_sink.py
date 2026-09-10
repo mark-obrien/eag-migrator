@@ -55,6 +55,19 @@ class Handler(BaseHTTPRequestHandler):
                      "cookie": self.headers.get("Cookie")})
         self._reply()
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        SEEN.append({"method": "DELETE", "path": self.path})
+        if REPLY.get("html"):
+            # The host's front end: any unknown path gets the SPA shell, 200.
+            body = b"<!DOCTYPE html><html><body>app</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._reply()
+
 
 @pytest.fixture
 def api():
@@ -192,6 +205,65 @@ def test_an_http_error_is_still_an_error(api):
 
     assert results[0].action == "failed"
     assert "400" in results[0].error
+
+
+# --- undo -------------------------------------------------------------------
+
+
+def _undo(api, entries, **kw):
+    sink = ApiSink(api, **kw)
+    try:
+        return sink.undo("customers", "customers", "key", entries)
+    finally:
+        sink.close()
+
+
+def test_undo_deletes_against_the_entitys_real_endpoint(api):
+    REPLY["body"] = {"data": "abc", "succeeded": True, "messages": []}
+    n = _undo(api, [{"action": "inserted", "target_id": "abc",
+                     "endpoint": "/api/V1/customers"}])
+
+    assert n == 1
+    assert SEEN[0] == {"method": "DELETE", "path": "/api/V1/customers/abc"}
+
+
+def test_undo_refuses_to_guess_a_path_when_no_endpoint_is_known(api):
+    """`/customers` is not `/api/V1/customers`. A guessed DELETE that the front
+    end answers with 200 would be counted as a success while removing nothing
+    — which is exactly how a rollback came to report 0 rows and still wipe
+    its journal."""
+    REPLY["body"] = {"succeeded": True}
+    n = _undo(api, [{"action": "inserted", "target_id": "abc"}])
+
+    assert n == 0
+    assert SEEN == []
+
+
+def test_undo_does_not_count_an_html_200_as_a_deletion(api):
+    REPLY["html"] = True
+    n = _undo(api, [{"action": "inserted", "target_id": "abc",
+                     "endpoint": "/api/V1/customers"}])
+    REPLY.pop("html")
+
+    assert n == 0
+
+
+def test_undo_does_not_count_a_200_that_says_it_failed(api):
+    REPLY["body"] = {"data": None, "succeeded": False,
+                     "messages": ["Cannot delete the default customer"]}
+    n = _undo(api, [{"action": "inserted", "target_id": "abc",
+                     "endpoint": "/api/V1/customers"}])
+
+    assert n == 0
+
+
+def test_undo_treats_already_gone_as_undone(api):
+    REPLY["status"] = 404
+    REPLY["body"] = {}
+    n = _undo(api, [{"action": "inserted", "target_id": "abc",
+                     "endpoint": "/api/V1/customers"}])
+
+    assert n == 1
 
 
 # --- credentials ------------------------------------------------------------

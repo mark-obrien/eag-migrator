@@ -277,6 +277,21 @@ def test_resuming_after_editing_the_mapping_is_refused(runner, mapping, v3_url):
 # --- verification -----------------------------------------------------------
 
 
+def test_limit_holds_inside_a_batch_not_just_between_them(runner, v3_url):
+    """`--limit` is the valve for a cautious first run. The batch size here is
+    2, so a limit of 3 lands mid-batch; the old check ran only after a batch
+    had committed and would have written 4. Against production it wrote 500
+    for a limit of 10."""
+    report = runner.apply(["customers"], limit=3)
+
+    outcome = next(e for e in report.entities if e.name == "customers")
+    assert outcome.processed == 3
+    assert outcome.inserted + outcome.skipped + outcome.failed == 3
+    with build_engine(v3_url).connect() as conn:
+        written = conn.execute(text("SELECT COUNT(*) FROM customers")).scalar()
+    assert written == outcome.inserted
+
+
 def test_verify_passes_on_a_clean_migration(runner, mapping, state):
     report = runner.apply()
     result = run_verify(runner, mapping, state, report.run_id, sample_size=50)

@@ -246,18 +246,41 @@ class ApiSink:
     def undo(
         self, entity_name: str, table: str, key_column: str, entries: list[dict[str, Any]]
     ) -> int:
-        """Best-effort DELETE against the same endpoint. Requires v3 to expose one."""
+        """DELETE each inserted row against the entity's real endpoint.
+
+        Two things this refuses to do, both learned the hard way. It will not
+        guess a path: `/<table>` is not `/api/V1/<table>`, and the host's
+        front end answers unknown paths with 200, so a guessed DELETE reported
+        success while removing nothing. And a 2xx is not taken at face value:
+        that same catch-all serves HTML, and v3 can answer 200 with
+        `succeeded: false`. A row counts as undone only when the target says
+        so in JSON (or with a bare 204), or says it was already gone.
+        """
         affected = 0
         for entry in entries:
-            if entry["action"] != "inserted" or entry.get("target_id") in (None, "None"):
+            if entry["action"] != "inserted" or entry.get("target_id") in (None, "", "None"):
                 continue
-            endpoint = entry.get("endpoint") or f"/{table}"
+            endpoint = entry.get("endpoint")
+            if not endpoint:
+                continue  # nothing to undo against; leave the journal intact
             try:
                 resp = self.client.delete(f"{endpoint.rstrip('/')}/{entry['target_id']}")
-                if resp.status_code < 400 or resp.status_code == 404:
-                    affected += 1
             except Exception:  # noqa: BLE001 - report totals, do not abort the rollback
                 continue
+            if resp.status_code == 404 or resp.status_code == 204:
+                affected += 1
+                continue
+            if resp.status_code >= 400:
+                continue
+            if "json" not in resp.headers.get("content-type", ""):
+                continue  # an HTML 200 is the catch-all, not a deletion
+            try:
+                body = resp.json()
+            except ValueError:
+                continue
+            ok, _problem, _record = _unwrap(body)
+            if ok:
+                affected += 1
         return affected
 
     def close(self) -> None:
