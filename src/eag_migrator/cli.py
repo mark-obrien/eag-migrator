@@ -1058,6 +1058,48 @@ def harvest(
     raise typer.Exit(1 if report.total_failed else 0)
 
 
+@app.command(name="link")
+def link_cmd() -> None:
+    """Work out which harvested customer each harvested job belongs to.
+
+    v2 records no customer id on a job, so the link is reconstructed from the
+    data: phone, then email, then an unambiguous name and postcode. Anything
+    pointing at more than one person is left alone rather than guessed — an
+    unlinked job still migrates, and v3 creates a customer from the details the
+    job carries.
+
+    Writes the answer into the staging database so it can be read and counted
+    before any of it reaches v3. Run it after `harvest` and before `run`.
+    """
+    _settings()
+    from .link import link_jobs_to_customers, render_markdown
+
+    if not STAGING_DB.exists():
+        console.print("[red]No staging database.[/red] Run [bold]eagm harvest[/bold] first.")
+        raise typer.Exit(1)
+
+    report = link_jobs_to_customers(STAGING_DB)
+    table = Table(title="Linking jobs to customers", header_style="bold")
+    table.add_column("Outcome")
+    table.add_column("Jobs", justify="right")
+    for method, count in sorted(report.by_method.items(), key=lambda kv: -kv[1]):
+        table.add_row(f"linked by {method}", f"{count:,}")
+    table.add_row("[dim]left unlinked — evidence named more than one person[/dim]",
+                  f"{report.ambiguous:,}")
+    table.add_row("[dim]left unlinked — no customer matched[/dim]", f"{report.unmatched:,}")
+    console.print(table)
+    console.print(
+        f"Linked [bold]{report.matched:,}[/bold] of {report.jobs:,} jobs "
+        f"({report.matched_pct:.1f}%)."
+    )
+    console.print(
+        "[dim]An unlinked job still migrates; v3 creates a customer from the "
+        "details it carries, so that person ends up in v3 twice.[/dim]"
+    )
+    save_text(render_markdown(report), REPORTS_DIR / "link.md")
+    console.print(f"[dim]report: {REPORTS_DIR / 'link.md'}[/dim]")
+
+
 @app.command(name="reset-staging")
 def reset_staging_cmd(
     cache: bool = typer.Option(
