@@ -126,7 +126,13 @@ def client(settings: Settings, path: Path | None = None):
             "v3's API base URL is not set. Set V3_API_BASE_URL in .env, or save "
             "a session from the dashboard."
         )
-    return build_client(creds.base_url, creds.token, settings.v3_api_timeout, creds.cookie)
+    return build_client(
+        creds.base_url,
+        creds.token,
+        settings.v3_api_timeout,
+        creds.cookie,
+        refresh_path=settings.v3_api_refresh_path or None,
+    )
 
 
 def env_hint() -> str:

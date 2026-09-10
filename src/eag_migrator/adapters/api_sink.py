@@ -40,18 +40,77 @@ def _looks_like_conflict(problem: str | None) -> bool:
     return bool(problem) and any(hint in problem.lower() for hint in _CONFLICT_HINTS)
 
 
+class BearerWithRefresh(httpx.Auth):
+    """Bearer auth that renews itself when the target says the session is over.
+
+    v3's access token lasts about an hour, which a migration of a few thousand
+    records will outlive. `GET /api/V1/tokens/refresh/` answers with
+    `Set-Cookie: AccessToken=…` — the body only says "ok" — so the new token is
+    read off the response rather than out of JSON. httponly keeps it from
+    browser scripts, not from a client like this one.
+
+    The renewal window is fixed at login: refreshing issues a fresh token but
+    does not extend the right to refresh again, so this buys hours, not
+    forever. When the window has closed the 401 stands and the run stops with
+    the target's own message rather than silently writing nothing.
+    """
+
+    requires_response_body = False
+
+    def __init__(self, token: str | None, refresh_url: str | None,
+                 cookie: str | None = None) -> None:
+        self.token = token
+        self.refresh_url = refresh_url
+        self.cookie = cookie
+        self.refreshes = 0
+
+    def _apply(self, request: httpx.Request) -> None:
+        if self.token:
+            value = self.token
+            request.headers["Authorization"] = (
+                value if value.lower().startswith("bearer ") else f"Bearer {value}"
+            )
+        if self.cookie:
+            request.headers["Cookie"] = self.cookie
+
+    def auth_flow(self, request: httpx.Request) -> Any:
+        self._apply(request)
+        response = yield request
+        if response.status_code != 401 or not self.refresh_url:
+            return
+
+        renewal = httpx.Request("GET", self.refresh_url)
+        self._apply(renewal)
+        renewed = yield renewal
+        fresh = renewed.cookies.get("AccessToken") if renewed.status_code < 400 else None
+        if not fresh:
+            return  # the window has closed; let the original 401 stand
+
+        self.token = fresh
+        self.refreshes += 1
+        self._apply(request)
+        yield request
+
+
 def build_client(
     base_url: str,
     token: str | None = None,
     timeout: int = 30,
     cookie: str | None = None,
+    refresh_path: str | None = None,
 ) -> httpx.Client:
     """One place that knows how to authenticate against the target.
 
     Shared with `eagm api-get` / `api-post`, so probing the API exercises the
     same credentials and headers a real run would use.
     """
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    # Accept only. Content-Type is NOT a default: httpx sets it on requests that
+    # actually carry a body, and sending it on a bodyless GET makes v3 try to
+    # parse nothing — "The input does not contain any JSON tokens" — so every
+    # GET came back 422. That is how the snapshot reported "jobs: 0" against a
+    # tenant holding 561 of them, and why the fix looked right when it was
+    # checked against an empty tenant, where 0 was also the true answer.
+    headers = {"Accept": "application/json"}
     if token:
         # Devtools shows the header as "Bearer eyJ…", so that whole string is
         # what gets pasted. Sending it unchanged would produce "Bearer Bearer
@@ -64,7 +123,19 @@ def build_client(
     # at all, so a signed-in browser session is the only credential available.
     if cookie:
         headers["Cookie"] = cookie
-    return httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout)
+    base = base_url.rstrip("/")
+    if refresh_path:
+        # The credential moves onto the auth flow so it can be replaced mid-run;
+        # leaving it in the default headers as well would pin the stale one.
+        headers.pop("Authorization", None)
+        headers.pop("Cookie", None)
+        return httpx.Client(
+            base_url=base,
+            headers=headers,
+            timeout=timeout,
+            auth=BearerWithRefresh(token, base + refresh_path, cookie),
+        )
+    return httpx.Client(base_url=base, headers=headers, timeout=timeout)
 
 
 class ApiSink:
@@ -75,8 +146,9 @@ class ApiSink:
         timeout: int = 30,
         id_field: str | None = None,
         cookie: str | None = None,
+        refresh_path: str | None = None,
     ) -> None:
-        self.client = build_client(base_url, token, timeout, cookie)
+        self.client = build_client(base_url, token, timeout, cookie, refresh_path)
         self.id_field = id_field
 
     def columns(self, entity: EntityMap) -> list[str]:
