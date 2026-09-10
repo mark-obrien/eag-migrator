@@ -146,6 +146,24 @@ def test_a_rejection_can_be_a_skip_when_that_is_the_policy(api):
     assert results[0].error is None
 
 
+def test_skip_does_not_swallow_a_rejection_that_is_not_a_conflict(api):
+    """`conflict: skip` means "already there", not "ignore any refusal".
+
+    Swallowing a validation error makes a run that wrote nothing report as
+    clean: a rehearsal of 961 customers came back ok / 961 skipped while the
+    API had refused every one of them for a missing required field.
+    """
+    REPLY["body"] = {"succeeded": False, "messages": ["customerName is required"]}
+    sink = ApiSink(api)
+    try:
+        results = sink.write_batch(_entity("skip"), [(1, {"name": "Dana"})])
+    finally:
+        sink.close()
+
+    assert results[0].action == "failed"
+    assert "customerName is required" in results[0].error
+
+
 def test_a_2xx_with_no_json_body_is_still_an_insert(api):
     REPLY["body"] = None          # serialises to "null", which is valid JSON
     results = _write(api)

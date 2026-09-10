@@ -1,0 +1,290 @@
+# EAG v2 -> v3 mapping.
+#
+# Source is state/staging.sqlite, the harvest of the v2 site. Target is v3's
+# HTTP API. Field names on the v3 side come from docs/v3-api.md, which was read
+# off the live tenant rather than guessed.
+#
+#   eagm plan                 # dry run: transforms everything, writes nothing
+#   eagm run --yes            # for real
+#
+# THE DECISION THIS ENCODES: jobs carry their customer denormalised, exactly as
+# v2 holds them, and no customer link is synthesised. v3's job has
+# customerFirstName / customerLastName / customerEmail / customerPhone and its
+# own address objects, so the job still says who it was for. `customerKey` is
+# deliberately left unmapped. See the long note at the end of
+# config/harvest.eag-v2.yaml for why matching was rejected.
+#
+# WHAT IS NOT SETTLED YET — each is marked at the field it affects:
+#   * Whether v3 accepts a job with no customerKey. Nothing in the API says,
+#     and all 561 jobs of the failed import carried one. `plan` cannot answer
+#     it either; only one real POST can.
+#   * The enum codes (customerType, phoneType, addressType, status, jobType).
+#     Observed values are recorded, but no list of valid codes was published.
+#   * locationKey. v2's job detail does not name a shop, so it cannot be
+#     derived per job and every job would land at one location.
+#
+# NOT COVERED HERE: job_parts (609 rows) and job_notes (380). Both are child
+# rows, many per job, and v3 carries them as arrays inside the job
+# (jobLineItems, notes). One source row becomes one target record in this
+# engine, so folding many children into one parent payload is not something the
+# mapping can express today. They stay in staging until either a child endpoint
+# is found or the engine learns to aggregate.
+
+version: 1
+
+defaults:
+  batch_size: 100
+  on_error: record        # collect the bad rows, keep going, report at the end
+
+entities:
+
+  # --- customers ----------------------------------------------------------
+  # customer_details, not customers: the list screen renders four columns, the
+  # JSON detail behind it returns 24 including the address and tax exemption.
+  - name: customers
+    source:
+      table: customer_details
+      key: id
+    target:
+      table: customers
+      endpoint: /api/V1/customers
+      key: key              # v3 returns the new UUID as `key`
+      conflict: skip
+    id_map: true            # remembers v2 id -> v3 key, so a re-run updates
+    fields:
+      - to: customerFullName
+        from: full_name
+        transform: [trim]
+        required: true
+
+      - to: emailAddress
+        from: email
+        transform: [trim, email]
+
+      # v2 has its own externalAccountingId — the QuickBooks link — so this is
+      # a real business field being carried across, NOT somewhere to stash the
+      # v2 id.
+      - to: externalAccountingId
+        from: external_accounting_id
+        transform: [trim, nullif_empty]
+        note: >-
+          NOTE: v3's customer has no externalId, so nothing on the record says
+          which v2 customer it came from. The engine's own id-map keeps that
+          link locally, which is enough to re-run safely, but it lives in
+          state/ rather than in v3 — and a local file is exactly what was
+          missing when the last attempt had to be deleted wholesale rather
+          than reconciled. Worth asking EAG for a field to write it into.
+
+      - to: taxExemptNo
+        from: tax_exempt_number
+        transform: [trim, nullif_empty]
+      - to: taxExemptExpDate
+        from: tax_exempt_expiration
+        transform: [to_date]
+
+      - to: pricingProfileKey
+        const: 019fca0c-f9f2-7044-bc42-90912dbf150b
+        note: the tenant's only pricing profile, read from the live snapshot
+
+      - to: isActive
+        const: true
+
+      # Phones. v2 keeps phone / alt_phone / fax flat; v3 wants a list.
+      - to: phoneList[0].phoneNumber
+        from: phone
+        transform: [phone]
+      - to: phoneList[0].phoneType
+        const: 1
+        note: >-
+          UNCONFIRMED enum. 1 is what the tenant's own records use for a
+          primary number; no list of valid phoneType codes was published.
+      - to: phoneList[1].phoneNumber
+        from: alt_phone
+        transform: [phone]
+      - to: phoneList[1].phoneType
+        const: 2
+        note: UNCONFIRMED enum, as above. An entry with no number is dropped.
+
+      # Mailing address.
+      # nullif_empty throughout: v2 stores a missing address as "", and an
+      # entry of empty strings is not pruned — "" is data as far as the shape
+      # is concerned. Nulls let the empty ones drop out.
+      - to: addressList[0].address1
+        from: address1
+        transform: [trim, nullif_empty]
+      - to: addressList[0].address2
+        from: address2
+        transform: [trim, nullif_empty]
+      - to: addressList[0].city
+        from: city
+        transform: [trim, nullif_empty]
+      - to: addressList[0].region
+        from: state
+        transform: [trim, upper, nullif_empty]
+      - to: addressList[0].postalCode
+        from: zip
+        transform:
+          - postal_code: {region: US}
+      - to: addressList[0].country
+        const: US
+      - to: addressList[0].addressType
+        const: 1
+        note: UNCONFIRMED enum.
+
+      # Physical address, where v2 holds one that differs from the mailing one.
+      # Customers without it produce an entry of nulls, which is dropped before
+      # the payload is built rather than posted as an empty address.
+      - to: addressList[1].address1
+        from: physical_address1
+        transform: [trim, nullif_empty]
+      - to: addressList[1].address2
+        from: physical_address2
+        transform: [trim, nullif_empty]
+      - to: addressList[1].city
+        from: physical_city
+        transform: [trim, nullif_empty]
+      - to: addressList[1].region
+        from: physical_state
+        transform: [trim, upper, nullif_empty]
+      - to: addressList[1].postalCode
+        from: physical_zip
+        transform: [trim, nullif_empty]
+      - to: addressList[1].addressType
+        const: 2
+        note: UNCONFIRMED enum.
+    note: >-
+      customerType is deliberately not mapped. v2 has is_business, v3 has an
+      integer customerType, and the only observed value is 9 on the tenant's
+      default customer — which is not enough to derive a mapping. Left for v3
+      to default rather than guessed at.
+
+  # --- jobs ---------------------------------------------------------------
+  - name: jobs
+    source:
+      table: jobs
+      key: id
+    target:
+      table: jobs
+      endpoint: /api/V1/jobs
+      key: key
+      conflict: skip
+    id_map: true
+    depends_on: []          # no customer lookup, by decision
+    fields:
+      # The v2 job id, recorded on the record itself. The failed import wrote
+      # nothing here, which is why 561 jobs could only be deleted rather than
+      # matched up and resumed.
+      - to: externalId
+        from: id
+        transform: [trim]
+        required: true
+
+      - to: tenantSpecificJobNumber
+        from: order_num
+        transform: [trim, nullif_empty]
+
+      - to: locationKey
+        const: 01a043be-20ef-7606-a45c-d2713c568bd6
+        note: >-
+          White Bear Lake, the busier of the two shops (417 of the failed
+          import's 561 jobs). UNRESOLVED: v2's job detail names no shop, so
+          this cannot be derived per job and every job will land here. The
+          jobs_board collection does carry a `shop` column — reattaching it
+          would need a join this mapping cannot express, and the board is only
+          34 rows anyway. Confirm with the owner before a real run.
+
+      - to: pricingProfileKey
+        const: 019fca0c-f9f2-7044-bc42-90912dbf150b
+
+      # The customer, denormalised. This is the decision.
+      - to: customerFirstName
+        from: customer_first_name
+        transform: [trim]
+      - to: customerLastName
+        from: customer_last_name
+        transform: [trim]
+      - to: customerDisplayName
+        from: [customer_first_name, customer_last_name]
+        transform:
+          - concat: {sep: " "}
+          - trim
+      - to: customerEmail
+        from: customer_email
+        transform: [trim, email]
+      - to: customerPhone.phoneNumber
+        from: customer_phone
+        transform: [phone]
+      - to: customerPhone.phoneType
+        const: 1
+
+      - to: installAddress.address1
+        from: customer_address1
+        transform: [trim]
+      - to: installAddress.address2
+        from: customer_address2
+        transform: [trim, nullif_empty]
+      - to: installAddress.city
+        from: customer_city
+        transform: [trim]
+      - to: installAddress.region
+        from: customer_state
+        transform: [trim, upper]
+      - to: installAddress.postalCode
+        from: customer_zip
+        transform:
+          - postal_code: {region: US}
+      - to: installAddress.country
+        const: US
+
+      # The vehicle.
+      - to: vehicle.vin
+        from: vehicle_vin
+        transform: [trim, upper, vin]
+      - to: vehicle.year
+        from: vehicle_year
+        transform: [trim]
+      - to: vehicle.make
+        from: vehicle_make
+        transform: [trim]
+      - to: vehicle.model
+        from: vehicle_model
+        transform: [trim]
+      - to: vehicle.bodyStyle
+        from: vehicle_body
+        transform: [trim, nullif_empty]
+      - to: vehicle.plate
+        from: vehicle_plate
+        transform: [trim, upper, nullif_empty]
+      - to: vehicle.mileage
+        from: vehicle_mileage
+        transform: [trim, nullif_empty]
+      - to: vehicle.nagsVehicleId
+        from: nags_car_id
+        transform: [trim, nullif_empty]
+
+      # Dates and the loss.
+      - to: installDate
+        from: install_date
+        transform: [to_date]
+      - to: dateOfLoss
+        from: loss_date
+        transform: [to_date]
+      - to: referralDate
+        from: referral_date
+        transform: [to_date]
+      - to: causeOfLoss
+        from: loss_cause
+        transform: [trim, nullif_empty]
+      - to: poNumber
+        from: order_num
+        transform: [trim, nullif_empty]
+    note: >-
+      customerKey is NOT mapped — that is the decision, not an omission. If v3
+      rejects a job without one, that is the thing to find out from a single
+      real POST before a full run; `plan` writes nothing and cannot tell you.
+
+      Also unmapped, deliberately: `status` and `isComplete` (v2's job detail
+      carries no stage — only the 34-row jobs_board does), and `total_due`
+      (v3 splits money across customerLaborTotal / customerPartsTotal /
+      customerTaxTotal / customerTotalPaid, and which of those a single v2
+      "total due" belongs in is not something to guess with money).

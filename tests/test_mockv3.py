@@ -139,13 +139,25 @@ def test_an_unknown_customer_type_is_rejected_even_when_lenient(mock):
 
 
 def test_strict_mode_enforces_the_known_required_fields(strict_mock):
+    """The names checked are v3's real ones, so passing here means something."""
     sink = ApiSink(strict_mock)
-    # Missing pricingProfile and phoneNumber.
-    [result] = sink.write_batch(_entity(), [(1, {"customerName": "X", "customerType": 9})])
+    # Missing pricingProfileKey.
+    [result] = sink.write_batch(_entity(), [(1, {"customerFullName": "X"})])
     sink.close()
 
     assert result.action == "failed"
-    assert "required" in result.error
+    assert "pricingProfileKey is required" in result.error
+
+
+def test_strict_mode_accepts_a_record_carrying_the_real_field_names(strict_mock):
+    sink = ApiSink(strict_mock)
+    [result] = sink.write_batch(
+        _entity(),
+        [(1, {"customerFullName": "Dana Reyes", "pricingProfileKey": "pp-1"})],
+    )
+    sink.close()
+
+    assert result.action == "inserted", result.error
 
 
 def test_lenient_mode_stores_a_thin_record_so_the_pipeline_can_run(mock):

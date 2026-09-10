@@ -29,6 +29,17 @@ ERROR_KEYS = ("messages", "errors", "error", "message", "detail", "title")
 ID_FIELDS = ("id", "key", "uuid", "guid", "_id")
 
 
+# What a target says when the record is already there. There is no status code
+# for it inside a 200 envelope, so the wording is all there is to go on — but
+# matching a few phrases is far better than the alternative of calling every
+# refusal a skip.
+_CONFLICT_HINTS = ("already exists", "already registered", "duplicate", "conflict")
+
+
+def _looks_like_conflict(problem: str | None) -> bool:
+    return bool(problem) and any(hint in problem.lower() for hint in _CONFLICT_HINTS)
+
+
 def build_client(
     base_url: str,
     token: str | None = None,
@@ -131,7 +142,14 @@ class ApiSink:
 
             ok, problem, record = _unwrap(body)
             if not ok:
-                if entity.target.conflict == "skip":
+                # `conflict: skip` means "that record is already there", not
+                # "ignore anything the server objects to". Treating every
+                # rejection as a skip hides validation errors behind a clean
+                # run: a rehearsal of 961 customers came back ok/961-skipped
+                # while the API had refused every single one for a missing
+                # field. A conflict is a skip; everything else is a failure,
+                # whatever the policy says.
+                if entity.target.conflict == "skip" and _looks_like_conflict(problem):
                     results.append(WriteResult(source_id, None, "skipped", payload=row))
                 else:
                     results.append(

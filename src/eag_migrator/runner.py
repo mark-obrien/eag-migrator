@@ -11,6 +11,7 @@ Guarantees this is built around:
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -130,6 +131,13 @@ class Runner:
         be re-derived later and must not be diffed.
         """
         out: dict[str, Any] = {}
+        # Only subtrees built from a nested `to:` are pruned. A flat field whose
+        # value happens to be a list — `from: [a, b]` with no transform — is left
+        # exactly as it was.
+        nested_roots: set[str] = set()
+        # Leaf names under each root that came from `const:` — a type code or a
+        # hardcoded country, set whether or not the entry holds anything.
+        const_leaves: dict[str, set[str]] = {}
         for fmap in entity.fields:
             value = self._extract(fmap, src)
             try:
@@ -146,7 +154,17 @@ class Runner:
             if fmap.required and value is None:
                 raise RowError(fmap.to, "required field resolved to null")
 
-            out[fmap.to] = value
+            if _is_nested(fmap.to):
+                tokens = _path_tokens(fmap.to)
+                root = str(tokens[0])
+                _assign_path(out, fmap.to, value)
+                nested_roots.add(root)
+                if fmap.const is not None:
+                    const_leaves.setdefault(root, set()).add(str(tokens[-1]))
+            else:
+                out[fmap.to] = value
+        for root in nested_roots:
+            out[root] = _prune(out[root], frozenset(const_leaves.get(root, ())))
         return out
 
     @staticmethod
@@ -577,6 +595,91 @@ class Runner:
         self.state.clear_journal(run_id)
         self.state.finish_run(run_id, "rolled_back")
         return {"run_id": run_id, "rows_undone": undone, "detail": details}
+
+
+# --- nested target paths ------------------------------------------------------
+#
+# A JSON API does not take a flat row. v3's job wants `vehicle` as an object and
+# `billingAddress` as another; its customer wants `addressList` and `phoneList`
+# as arrays of objects. So `to:` accepts a path — `vehicle.vin`,
+# `addressList[0].city` — and the row is assembled into that shape. A `to:` with
+# no dot or bracket behaves exactly as it always did, which is what a database
+# target needs, since a column called `vehicle.vin` does not exist.
+
+_SEGMENT = re.compile(r"([^.\[\]]+)((?:\[\d+\])*)$")
+
+
+def _is_nested(path: str) -> bool:
+    return "." in path or "[" in path
+
+
+def _path_tokens(path: str) -> list[str | int]:
+    """`addressList[0].city` -> ['addressList', 0, 'city']."""
+    tokens: list[str | int] = []
+    for part in path.split("."):
+        match = _SEGMENT.fullmatch(part)
+        if not match:
+            raise RowError(path, f"malformed target path {path!r}")
+        tokens.append(match.group(1))
+        tokens.extend(int(i) for i in re.findall(r"\[(\d+)\]", match.group(2)))
+    return tokens
+
+
+def _assign_path(out: dict[str, Any], path: str, value: Any) -> None:
+    tokens = _path_tokens(path)
+    cursor: Any = out
+    for position, token in enumerate(tokens[:-1]):
+        empty: Any = [] if isinstance(tokens[position + 1], int) else {}
+        if isinstance(token, int):
+            while len(cursor) <= token:
+                cursor.append(None)
+            if cursor[token] is None:
+                cursor[token] = empty
+            cursor = cursor[token]
+        else:
+            if cursor.get(token) is None:
+                cursor[token] = empty
+            cursor = cursor[token]
+    last = tokens[-1]
+    if isinstance(last, int):
+        while len(cursor) <= last:
+            cursor.append(None)
+    cursor[last] = value
+
+
+def _blank(value: Any, const_keys: frozenset[str] = frozenset()) -> bool:
+    """Is there any actual data here?
+
+    Fields set from `const:` do not count. An address entry is typically
+    `addressType: 2` plus a `const` country, and those are set whether or not
+    the customer has a second address — so counting them as data means nothing
+    is ever pruned, and every customer is sent an empty second address labelled
+    "type 2". A dict of nothing but const keys is blank.
+    """
+    if value is None or value == "":
+        return True
+    if isinstance(value, dict):
+        return all(
+            _blank(v, const_keys) for k, v in value.items() if k not in const_keys
+        )
+    if isinstance(value, list):
+        return all(_blank(v, const_keys) for v in value)
+    return False
+
+
+def _prune(value: Any, const_keys: frozenset[str] = frozenset()) -> Any:
+    """Drop array entries that carry no data.
+
+    A customer with one address still has an `addressList[1].*` mapping, and
+    without this every such customer would be sent a second address object full
+    of nulls. Only entries inside arrays are dropped — object keys are left
+    alone, so a field mapped to null still reaches the API as null.
+    """
+    if isinstance(value, dict):
+        return {k: _prune(v, const_keys) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_prune(v, const_keys) for v in value if not _blank(v, const_keys)]
+    return value
 
 
 def _resolve_default(value: Any) -> Any:

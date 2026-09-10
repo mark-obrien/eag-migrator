@@ -286,10 +286,12 @@ collections:
           selector: "#job-customer-city"
         - to: customer_zip
           selector: "#job-customer-zip"
-        # State is the one field addressed by class rather than by id. The
-        # #job-customer-state select exists only in edit mode.
+        # State is the one field addressed by class rather than by id.
+        # NOT `.job-state` — that div holds a <p> with the value AND a <select>
+        # of all 50 states, so reading the div returned "MN Select a state...
+        # Alabama Alaska Arizona..." on all 626 jobs. The <p> is the value.
         - to: customer_state
-          selector: ".job-state"
+          selector: ".job-state p"
         - to: vehicle_vin
           selector: "#job-vehicle-vin"
         - to: vehicle_year
@@ -310,8 +312,16 @@ collections:
           selector: "#job-order-num"
         - to: install_date
           selector: "#job-install-date"
+        # NOT USABLE AS A TIME, and not mapped to v3. #job-install-time is
+        # three <select>s — hour, minute, AM/PM. Reading the div returned
+        # "-- 1 2 3 4 ... AM/PM AM PM" (the options) on every job; reading the
+        # selected options gets the hour alone, on only 42 of 626 jobs, with no
+        # minute and no AM/PM. So the time is mostly applied by JavaScript and
+        # is not in the HTML this client fetches. Left in place at the corrected
+        # selector so the column holds something true rather than a list of
+        # options, but a real time would have to come from a browser.
         - to: install_time
-          selector: "#job-install-time"
+          selector: "#job-install-time option[selected]"
         - to: glass_order_date
           selector: "#job-glass-order-date"
         - to: glass_arrival_date
@@ -320,8 +330,15 @@ collections:
           selector: "#job-referral-date"
         - to: loss_date
           selector: "#job-loss-date"
+        # The selected option, not the whole <select> — reading the element
+        # returned every cause concatenated on all 626 jobs.
+        #
+        # Read correctly this is genuine per-job data, but it takes the whole
+        # set to see that: 617 of 626 are "Rock from Road - No One at Fault",
+        # so any small sample looks like a stuck default. It is not — the
+        # remainder are vandalism (8) and a tree branch (1).
         - to: loss_cause
-          selector: "#job-loss-cause"
+          selector: "#job-loss-cause option[selected]"
         - to: total_due
           selector: "#job-total-due"
         - to: salesperson

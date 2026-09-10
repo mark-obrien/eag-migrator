@@ -26,8 +26,17 @@ DEFAULT_PORT = 19090
 # Fields we are confident a customer needs, from the survey. Enforced only in
 # strict mode, because the survey gave the *labels*, not v3's JSON field names
 # — so a real create request (`eagm api-post`) is what confirms these.
+# Real v3 field names, from docs/v3-api.md — read off the live tenant. The
+# earlier list (customerName, customerType, pricingProfile, phoneNumber) came
+# from a survey and named fields the API does not have, so strict mode was
+# checking a rehearsal against a vocabulary v3 never uses: a mapping could pass
+# here and be refused in production, or fail here and have been fine.
+#
+# Which fields the live API actually insists on is not published. These are the
+# mock's own judgment about what a record is meaningless without, not a
+# contract — hence only the two that are unarguable.
 DEFAULT_REQUIRED = {
-    "customers": ["customerName", "customerType", "pricingProfile", "phoneNumber"],
+    "customers": ["customerFullName", "pricingProfileKey"],
 }
 
 # Endpoints that write, and the entity each stores under.
