@@ -249,15 +249,22 @@ entities:
         from: order_num
         transform: [trim, nullif_empty]
 
+      # RESOLVED. The job detail does name its shop after all — a
+      # <select id="default-shop-dropdown">, which the harvest now captures as
+      # `shop` (1 = Minneapolis, 2 = White Bear Lake). Map the v2 code to the
+      # v3 location key. strict: an unexpected code fails the row rather than
+      # silently defaulting it to a shop, because putting a job at the wrong
+      # location is the kind of error nobody notices. The two keys are the
+      # tenant's real ones, read from the v3 snapshot.
       - to: locationKey
-        const: 01a043be-20ef-7606-a45c-d2713c568bd6
-        note: >-
-          White Bear Lake, the busier of the two shops (417 of the failed
-          import's 561 jobs). UNRESOLVED: v2's job detail names no shop, so
-          this cannot be derived per job and every job will land here. The
-          jobs_board collection does carry a `shop` column — reattaching it
-          would need a join this mapping cannot express, and the board is only
-          34 rows anyway. Confirm with the owner before a real run.
+        from: shop
+        transform:
+          - map:
+              strict: true
+              values:
+                "1": 01a043bc-0465-7187-a5c1-71884e43e801   # Minneapolis
+                "2": 01a043be-20ef-7606-a45c-d2713c568bd6   # White Bear Lake
+        required: true
 
       - to: pricingProfileKey
         const: 019fca0c-f9f2-7044-bc42-90912dbf150b

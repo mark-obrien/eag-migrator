@@ -310,6 +310,15 @@ collections:
           selector: "#job-vehicle-nagscarid"
         - to: order_num
           selector: "#job-order-num"
+        # The shop the job belongs to. A <select id="default-shop-dropdown">
+        # with value 1 = Minneapolis, 2 = White Bear Lake — take the selected
+        # option's value, not its text (the text is padded with a wall of
+        # whitespace). Populated on all 626 jobs: 458 WBL, 168 Minneapolis. The
+        # mapping turns these into v3 locationKeys; before this was captured,
+        # every job was forced to White Bear Lake, misplacing the 168.
+        - to: shop
+          selector: "#default-shop-dropdown option[selected]"
+          attr: value
         - to: install_date
           selector: "#job-install-date"
         # NOT USABLE AS A TIME, and not mapped to v3. #job-install-time is
