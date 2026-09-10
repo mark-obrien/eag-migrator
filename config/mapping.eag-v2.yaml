@@ -13,9 +13,13 @@
 #
 # The original plan was to synthesise no link at all. A real POST killed it: v3
 # accepts a job with no customerKey, but then invents a customer from the job's
-# own fields and does not deduplicate them — two jobs for one person made two
-# customers — each with a null customerId, invisible in the customer list. So
-# "no link" meant 626 second-class customer records, not none.
+# own fields and does NOT deduplicate them — two jobs for one person made two
+# separate customers. So "no link" meant up to 626 duplicate customers, layered
+# on top of the 961 migrated in their own right. (An earlier version of this
+# note also called them "second-class, invisible in the customer list" because
+# of a null customerId. That was wrong — a customer created by hand in the v3
+# UI has no customerId either; it is simply not assigned at creation. The
+# problem is the duplication, not the records themselves.)
 #
 # `eagm link` therefore matches jobs to customers first, on phone, then email,
 # then an unambiguous name+postcode, and refuses anything that points at more
@@ -346,10 +350,12 @@ entities:
       SUPERSEDED DECISION, kept because the reasoning still applies: jobs were
       going to carry the customer denormalised with no link at all. A real POST
       showed v3 accepts that — but then invents a customer per job and does not
-      deduplicate them, so 626 jobs would have made 626 extra customer records,
-      each with a null customerId and invisible in the customer list. Linking
-      where the evidence is unambiguous avoids 573 of those; the rest are
-      accepted as duplicates rather than guessed at.
+      deduplicate them, so 626 jobs would have made up to 626 extra customer
+      records duplicating the 961 migrated separately. Linking where the
+      evidence is unambiguous avoids 573 of those; the rest are accepted as
+      duplicates rather than guessed at. (The duplication is the reason — not
+      any defect in the auto-created records; a null customerId is normal, as a
+      hand-created v3 customer has none either.)
 
       Also unmapped, deliberately: `status` and `isComplete` (v2's job detail
       carries no stage — only the 34-row jobs_board does), and `total_due`
