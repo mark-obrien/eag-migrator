@@ -671,14 +671,32 @@ collections:
 # are therefore not a long stop — they are the main path, and that changes the
 # risk of this migration rather than just its effort.
 #
-# DO NOT let the tool guess its way through that. Options worth weighing
-# before any of it is written to v3:
-#   * Migrate jobs with their customer fields denormalised, exactly as v2
-#     holds them, and do not synthesise a customer link at all.
-#   * Ask whether v2's operator can export the real foreign key — the
-#     application clearly has it, even though no screen exposes it.
-#   * Match on the fallbacks below, migrate only the unambiguous ones, and
-#     hand the rest to a person as a worklist.
+# DECIDED (2026-09-10, by the shop owner): DO NOT SYNTHESISE THE LINK.
+#
+# Jobs are migrated with their customer fields denormalised, exactly as v2
+# holds them. No name/phone/email matching is performed, and no customer
+# reference is invented for a job. A wrong link is silent — the job simply
+# belongs to the wrong person in v3 and nothing downstream complains — and at
+# ~2% server-asserted coverage the matching would have been guesswork for
+# nearly every job.
+#
+# What that costs is the relationship, not the data. Measured on the 626 jobs
+# harvested, the customer fields carried on the job itself are:
+#
+#     state 100%, phone 97.8%, last_name 96.6%, city 94.2%, address1 92.3%,
+#     zip 92.0%, first_name 81.0%, email 78.4%, account_number 2.6%
+#
+# So each job still says who it was for; it just does not point at a customer
+# record. The fallbacks listed below are therefore NOT to be implemented.
+# They are kept only to document what was considered and rejected.
+#
+# The consequence to design around: a person can end up in v3 twice — once as
+# a customer record from the customers collection, and once as text on a job.
+# Whether that is acceptable, or whether jobs should carry no customer text at
+# all, depends on what v3's job entity actually accepts. That is not yet
+# known: no job-create endpoint has been established, only POST
+# /api/V1/jobs/search for reading. Run `eagm v3-snapshot` and settle it from
+# the real field names before writing the jobs half of the mapping.
 #
 # Do not match on name. 740 customers in one town will contain repeated
 # names, and a wrong link is silent — the job simply belongs to the wrong
