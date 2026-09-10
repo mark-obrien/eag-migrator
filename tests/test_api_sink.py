@@ -182,6 +182,18 @@ def test_a_token_still_becomes_a_bearer_header(api):
     assert SEEN[0]["cookie"] is None
 
 
+def test_a_token_pasted_with_its_prefix_is_not_doubled(api):
+    """Devtools shows "Bearer eyJ…", so that whole string is what gets pasted.
+
+    Sending it unchanged would mean "Bearer Bearer eyJ…" and a 401 that says
+    nothing about why — an afternoon lost to a credential that was correct.
+    """
+    REPLY["body"] = {"data": {"key": "abc"}, "succeeded": True}
+    _write(api, token="Bearer tok123")
+
+    assert SEEN[0]["auth"] == "Bearer tok123"
+
+
 def test_the_row_is_posted_to_the_configured_endpoint(api):
     REPLY["body"] = {"succeeded": True, "data": {"key": "abc"}}
     _write(api, rows=[(7, {"name": "Dana", "customerType": 9})])

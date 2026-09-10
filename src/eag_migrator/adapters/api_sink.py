@@ -42,7 +42,13 @@ def build_client(
     """
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        # Devtools shows the header as "Bearer eyJ…", so that whole string is
+        # what gets pasted. Sending it unchanged would produce "Bearer Bearer
+        # eyJ…" and a 401 with nothing to say why. Matches what the v2 side
+        # already does in Session.from_env.
+        headers["Authorization"] = (
+            token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        )
     # Some APIs authenticate with an HttpOnly session cookie and issue no token
     # at all, so a signed-in browser session is the only credential available.
     if cookie:
