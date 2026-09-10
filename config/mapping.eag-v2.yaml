@@ -31,12 +31,13 @@
 #   eagm plan                 # dry run: transforms everything, writes nothing
 #   eagm run --yes            # for real
 #
-# WHAT IS NOT SETTLED YET — each is marked at the field it affects:
+# WHAT IS NOT SETTLED YET — one field, marked where it lives:
 #   * customerType. Required, and only two codes were ever observed (7 for an
 #     individual, 9 for the tenant default). The code for a business is unknown,
-#     so v2's is_business currently changes nothing.
-#   * locationKey. v2's job detail does not name a shop, so it cannot be
-#     derived per job and every job would land at one location.
+#     so v2's is_business currently changes nothing — every customer goes as 7.
+#
+# (locationKey, job type, status and repair location were open here earlier and
+# are now resolved — see the notes at each field.)
 #
 # NOT COVERED HERE: job_parts (609 rows) and job_notes (380). Both are child
 # rows, many per job, and v3 carries them as arrays inside the job
@@ -389,23 +390,59 @@ entities:
         from: timeframe_end
         transform: [clock]
 
-      # CAPTURED BUT NOT MAPPED — need v3's own code lists first.
-      #
-      #   job_type   (v2: 5=Windshield Replacement, 2=Door Glass, 1=Back Glass,
-      #               4=Windshield Repair, 26=Other, 24=Calibration, 19=Roof)
-      #               -> v3 jobType, an integer enum. The failed import stored 0
-      #               ("Job") on every row, so v3's codes are not v2's and the
-      #               real list is unknown. Sending a guessed int would silently
-      #               mislabel every job.
-      #   job_stage  (v2: 17=Billed, 15=Cancelled, 8=Follow Up, ...) -> v3
-      #               status is a STRING (Invoice / Quote / Work Order) plus an
-      #               isComplete bool — a different vocabulary, not a recode.
-      #   repair_location (v2 'Mobile'; v3 stored 'inshop') — vocabularies
-      #               differ and the import may have defaulted, so not trusted.
-      #
-      # All three are in staging (job_type_name / job_stage_name keep the
-      # readable text). Map them once EAG supplies the code lists, or once a
-      # test POST establishes them.
+      # Job Type. The v3 field behind the UI's "Job Type" is installType, NOT
+      # jobType — jobType stays 0/'Job' even on a job created in v3's own UI.
+      # The owner confirmed v2 and v3 use the same Job Type codes (v2 5 =
+      # Windshield Replacement; the owner's hand-made v3 job carries
+      # installType 5), so the v2 code is passed straight through as the v3
+      # code. Passthrough rather than a lookup table on purpose: it carries the
+      # codes seen only once or twice (3, 21) whose labels were never observed,
+      # which a table would have had to drop.
+      - to: installType
+        from: job_type
+        transform: [int]
+        required: true
+
+      # Status. v2 has 11 stages; v3 has three (Invoice / Quote / Work Order)
+      # plus isComplete. Per the owner's decision: Billed -> Invoice, Quote
+      # stays Quote, everything else -> Work Order. Cancelled has no v3 state,
+      # so it lands in Work Order and is called out below to be closed by hand.
+      # The "*" default belongs INSIDE values — it is a key the map looks up,
+      # not an option of the transform. (First pass put it a level up, where it
+      # was ignored and every stage but Billed/Quote fell through unchanged.)
+      - to: status
+        from: job_stage_name
+        transform:
+          - trim
+          - map:
+              values:
+                Billed: Invoice
+                Quote: Quote
+                "*": Work Order
+      - to: isComplete
+        from: job_stage_name
+        transform:
+          - trim
+          - map:
+              values:
+                Billed: true
+                "*": false
+
+      # Repair location. v3's vocabulary is 'mobile' / 'inshop' (from the app
+      # bundle). v2 marks 478 jobs 'Mobile' and leaves 148 blank; a blank is
+      # read as in-shop, which is also v3's own default.
+      - to: repairLocation
+        from: repair_location
+        transform:
+          - map:
+              values:
+                Mobile: mobile
+                "*": inshop
+
+      # CANCELLED JOBS NEED A HUMAN. v3 has no cancelled status, so the 8 jobs
+      # at v2 stage 'Cancelled' migrate as 'Work Order'. After the run, close
+      # them in v3 by hand — find them by their externalId in staging:
+      #   select id from jobs where job_stage_name = 'Cancelled';
     note: >-
       SUPERSEDED DECISION, kept because the reasoning still applies: jobs were
       going to carry the customer denormalised with no link at all. A real POST
