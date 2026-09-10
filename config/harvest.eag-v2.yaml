@@ -319,6 +319,35 @@ collections:
         - to: shop
           selector: "#default-shop-dropdown option[selected]"
           attr: value
+        # Found by a deliberate sweep of every <select> on the job page, after
+        # the shop field turned out to have been missed. Each of these is a
+        # populated, per-job dropdown the earlier config ignored. Values are the
+        # option's `value`, not its padded text.
+        - to: job_type
+          selector: "#job-type option[selected]"
+          attr: value
+        - to: job_type_name
+          selector: "#job-type option[selected]"
+        - to: job_stage
+          selector: "#job-stage option[selected]"
+          attr: value
+        - to: job_stage_name
+          selector: "#job-stage option[selected]"
+        - to: signature_on_file
+          selector: "#signature-on-file option[selected]"
+          attr: value
+        - to: job_duration
+          selector: "#job-duration option[selected]"
+          attr: value
+        - to: timeframe_start
+          selector: "#job-timeframe-start option[selected]"
+          attr: value
+        - to: timeframe_end
+          selector: "#job-timeframe-end option[selected]"
+          attr: value
+        - to: repair_location
+          selector: "#job-repair-location option[selected]"
+          attr: value
         - to: install_date
           selector: "#job-install-date"
         # NOT USABLE AS A TIME, and not mapped to v3. #job-install-time is

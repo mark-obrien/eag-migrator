@@ -353,6 +353,59 @@ entities:
       - to: poNumber
         from: order_num
         transform: [trim, nullif_empty]
+
+      # --- fields the <select> sweep recovered -----------------------------
+      # These job dropdowns were being dropped. The three below map cleanly
+      # onto v3 fields whose stored format was checked against real records.
+
+      # v2 signature-on-file is 0/1; v3 isSignatureOnFile is a bool.
+      # 30 jobs have no option selected here at all; an absent signature is
+      # "not on file", so coalesce those to 0 before the strict map — which
+      # then guards against any value that is neither 0 nor 1.
+      - to: isSignatureOnFile
+        from: signature_on_file
+        transform:
+          - coalesce: {fallback: "0"}
+          - map:
+              strict: true
+              values: {"0": false, "1": true}
+
+      # v2 job-duration holds the hour count ('1', '0.5', '2') or the literal
+      # 'custom' when the shop typed a bespoke length that is not in this
+      # control. v3 installDuration is a float; 'custom' becomes null rather
+      # than a fabricated number.
+      - to: installDuration
+        from: job_duration
+        transform:
+          - map: {values: {custom: null}}
+          - float
+
+      # v2 keeps the customer's availability window as two hour numbers; v3
+      # stores customerTFStart / customerTFEnd as 'HH:MM:SS'.
+      - to: customerTFStart
+        from: timeframe_start
+        transform: [clock]
+      - to: customerTFEnd
+        from: timeframe_end
+        transform: [clock]
+
+      # CAPTURED BUT NOT MAPPED — need v3's own code lists first.
+      #
+      #   job_type   (v2: 5=Windshield Replacement, 2=Door Glass, 1=Back Glass,
+      #               4=Windshield Repair, 26=Other, 24=Calibration, 19=Roof)
+      #               -> v3 jobType, an integer enum. The failed import stored 0
+      #               ("Job") on every row, so v3's codes are not v2's and the
+      #               real list is unknown. Sending a guessed int would silently
+      #               mislabel every job.
+      #   job_stage  (v2: 17=Billed, 15=Cancelled, 8=Follow Up, ...) -> v3
+      #               status is a STRING (Invoice / Quote / Work Order) plus an
+      #               isComplete bool — a different vocabulary, not a recode.
+      #   repair_location (v2 'Mobile'; v3 stored 'inshop') — vocabularies
+      #               differ and the import may have defaulted, so not trusted.
+      #
+      # All three are in staging (job_type_name / job_stage_name keep the
+      # readable text). Map them once EAG supplies the code lists, or once a
+      # test POST establishes them.
     note: >-
       SUPERSEDED DECISION, kept because the reasoning still applies: jobs were
       going to carry the customer denormalised with no link at all. A real POST

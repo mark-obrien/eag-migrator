@@ -345,6 +345,25 @@ def _digits(value: Any, *, last: int = 0, **_: Any) -> Any:
     return kept[-last:] if last and len(kept) > last else kept
 
 
+@transform("clock")
+def _clock(value: Any, **_: Any) -> Any:
+    """An hour-of-day number into a v3 wall-clock string: 8 -> '08:00:00'.
+
+    v2's appointment-window selects hold a bare hour (0-23); v3 stores
+    customerTFStart / customerTFEnd as 'HH:MM:SS'. Anything that is not an
+    hour in range is passed through untouched rather than forced.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        hour = int(str(value).strip())
+    except (TypeError, ValueError):
+        return value
+    if 0 <= hour <= 23:
+        return f"{hour:02d}:00:00"
+    return value
+
+
 @transform("email")
 def _email(value: Any, *, strict: bool = False, **_: Any) -> Any:
     """Trim, lowercase and sanity-check an address; NULL if implausible."""

@@ -35,6 +35,17 @@ def test_digits_strips_everything_that_is_not_a_number():
     assert chain("no digits here", ["digits"]) is None
 
 
+def test_clock_turns_an_hour_into_a_wall_clock_string():
+    """v2 holds an appointment window as bare hours; v3 wants 'HH:MM:SS'."""
+    assert chain("8", ["clock"]) == "08:00:00"
+    assert chain("20", ["clock"]) == "20:00:00"
+    assert chain("0", ["clock"]) == "00:00:00"
+    assert chain(None, ["clock"]) is None
+    # Out of range or non-numeric is left as-is rather than forced.
+    assert chain("25", ["clock"]) == "25"
+    assert chain("noon", ["clock"]) == "noon"
+
+
 def test_digits_can_keep_just_the_last_n():
     """v3 refuses E.164 — "Phone number must contain only digits" — and holds
     ten bare digits, so the country code `phone` adds has to come back off."""
