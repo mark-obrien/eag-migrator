@@ -45,7 +45,13 @@ TARGETS = [
     Target("profile", "/api/V1/identity/profile"),
     Target("products", "/api/V1/products"),
     Target("customers", "/api/V1/customers", paged=True),
-    Target("jobs", "/api/V1/jobs/search", method="POST", paged=True, body={}),
+    # GET, not POST /api/V1/jobs/search. The search endpoint answers an empty
+    # body with an empty list, so the snapshot reported "jobs: 0" on a tenant
+    # holding 561 of them — and reporting an empty collection as a fact is
+    # worse than failing, because it reads as "v3 has no jobs yet" and hides
+    # the schema. `OPTIONS /api/V1/jobs` allows GET and POST; GET returns the
+    # lot. Presumably search wants criteria nobody has established.
+    Target("jobs", "/api/V1/jobs", paged=True),
 ]
 
 MAX_PAGES = 1000
