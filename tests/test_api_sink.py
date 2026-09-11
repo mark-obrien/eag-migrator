@@ -191,6 +191,36 @@ def test_skip_does_not_swallow_a_rejection_that_is_not_a_conflict(api):
     assert "customerName is required" in results[0].error
 
 
+def test_a_422_is_a_failure_even_under_conflict_skip(api):
+    """A 422 is the server rejecting the payload, not "already there". Under
+    conflict: skip it was lumped in with 409 and 59 rejected records in a real
+    run were hidden as harmless "skipped" — 52 customers with no phone, 6 jobs
+    with no customer name, plus one more."""
+    REPLY["status"] = 422
+    REPLY["body"] = {"errors": {"phoneList": ["At least one phone is required."]}}
+    sink = ApiSink(api)
+    try:
+        results = sink.write_batch(_entity("skip"), [(1, {"name": "Dana"})])
+    finally:
+        sink.close()
+
+    assert results[0].action == "failed"
+    assert "422" in results[0].error
+
+
+def test_a_409_is_still_a_skip_under_conflict_skip(api):
+    """The genuine 'already there' case must stay a skip."""
+    REPLY["status"] = 409
+    REPLY["body"] = {"message": "already exists"}
+    sink = ApiSink(api)
+    try:
+        results = sink.write_batch(_entity("skip"), [(1, {"name": "Dana"})])
+    finally:
+        sink.close()
+
+    assert results[0].action == "skipped"
+
+
 def test_a_2xx_with_no_json_body_is_still_an_insert(api):
     REPLY["body"] = None          # serialises to "null", which is valid JSON
     results = _write(api)

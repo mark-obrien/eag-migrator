@@ -35,6 +35,24 @@ def test_digits_strips_everything_that_is_not_a_number():
     assert chain("no digits here", ["digits"]) is None
 
 
+def test_to_datetime_can_anchor_the_time_of_day():
+    """A date-only value renders a day early in any timezone west of UTC,
+    because a browser reads 'YYYY-MM-DD' as UTC midnight. Anchoring at noon
+    keeps the calendar day the same. This is the install-date bug."""
+    got = chain("09/23/2026", [{"to_datetime": {"at": "12:00:00"}}])
+    assert got.isoformat() == "2026-09-23T12:00:00"
+    assert chain("", [{"to_datetime": {"at": "12:00:00"}}]) is None
+
+
+def test_safe_text_strips_firewall_triggering_characters():
+    """A vehicle model 'VERSA`' made v3's WAF answer the whole POST with a 403.
+    Backticks and angle brackets are never part of a real name or address."""
+    assert chain("VERSA`", ["safe_text"]) == "VERSA"
+    assert chain("O'Brien <script>", ["safe_text"]) == "O'Brien script"
+    assert chain("clean text", ["safe_text"]) == "clean text"
+    assert chain(None, ["safe_text"]) is None
+
+
 def test_clock_turns_an_hour_into_a_wall_clock_string():
     """v2 holds an appointment window as bare hours; v3 wants 'HH:MM:SS'."""
     assert chain("8", ["clock"]) == "08:00:00"

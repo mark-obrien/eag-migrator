@@ -195,9 +195,7 @@ DATE_FORMATS = [
 ]
 
 
-@transform("to_datetime")
-def _to_datetime(value: Any, *, formats: list[str] | None = None, **_: Any) -> Any:
-    """Parse a datetime from common formats or a unix epoch; MySQL zero-dates become NULL."""
+def _parse_datetime(value: Any, formats: list[str] | None) -> Any:
     if value is None or value == "":
         return None
     if isinstance(value, dt.datetime):
@@ -219,6 +217,26 @@ def _to_datetime(value: Any, *, formats: list[str] | None = None, **_: Any) -> A
         return dt.datetime.fromisoformat(s)
     except ValueError as exc:
         raise TransformError(f"unrecognised datetime: {value!r}") from exc
+
+
+@transform("to_datetime")
+def _to_datetime(
+    value: Any, *, formats: list[str] | None = None, at: str | None = None, **_: Any
+) -> Any:
+    """Parse a datetime from common formats or a unix epoch; MySQL zero-dates become NULL.
+
+    `at` ('HH:MM:SS') overrides the time of day. It exists for a specific,
+    non-obvious reason: a date-only value serialises as 'YYYY-MM-DD', and a
+    browser reads a date-only ISO string as UTC midnight — so a date meant as
+    a calendar day renders a day earlier in any timezone west of UTC (which
+    put every migrated install date one day back in Central). Anchoring at
+    noon leaves the wall-clock day the same under any real timezone offset.
+    """
+    got = _parse_datetime(value, formats)
+    if got is not None and at is not None:
+        h, m, s = (int(x) for x in at.split(":"))
+        got = got.replace(hour=h, minute=m, second=s, microsecond=0)
+    return got
 
 
 @transform("to_date")
@@ -343,6 +361,24 @@ def _digits(value: Any, *, last: int = 0, **_: Any) -> Any:
     if not kept:
         return None
     return kept[-last:] if last and len(kept) > last else kept
+
+
+@transform("safe_text")
+def _safe_text(value: Any, **_: Any) -> Any:
+    """Drop characters v3's web firewall rejects outright.
+
+    A single job carried a vehicle model 'VERSA`'; the stray backtick made the
+    WAF answer the whole POST with an opaque HTML 403, failing the record for a
+    reason nothing in the API explains. Backticks and angle brackets are never
+    part of a real name, address or vehicle, so they are stripped along with
+    control characters. Applied to the free-text fields where hand-keyed junk
+    turns up, not to structured ones like VIN or postcode.
+    """
+    if value is None:
+        return None
+    cleaned = re.sub(r"[`<>]", "", str(value))
+    cleaned = "".join(ch for ch in cleaned if ch >= " " or ch in "\t")
+    return cleaned
 
 
 @transform("clock")

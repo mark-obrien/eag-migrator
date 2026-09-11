@@ -190,7 +190,13 @@ class ApiSink:
                 )
                 continue
 
-            if resp.status_code in (409, 422) and entity.target.conflict == "skip":
+            # A 409 is "already there" — a real skip under conflict: skip. A 422
+            # is the server rejecting the payload (a required field missing, a
+            # bad value), which is a FAILURE, not a skip, whatever the conflict
+            # policy says. Lumping 422 in with 409 hid 59 rejected records in a
+            # production run as harmless "skipped" counts — the same mistake as
+            # treating a succeeded:false envelope as a skip, one layer down.
+            if resp.status_code == 409 and entity.target.conflict == "skip":
                 results.append(WriteResult(source_id, None, "skipped", payload=row))
                 continue
 

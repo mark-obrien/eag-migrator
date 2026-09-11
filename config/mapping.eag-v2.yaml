@@ -70,7 +70,7 @@ entities:
     fields:
       - to: customerFullName
         from: full_name
-        transform: [trim]
+        transform: [safe_text, trim]
         required: true
 
       - to: emailAddress
@@ -96,7 +96,7 @@ entities:
         transform: [trim, nullif_empty]
       - to: taxExemptExpDate
         from: tax_exempt_expiration
-        transform: [to_date]
+        transform: [{to_datetime: {at: "12:00:00"}}]
 
       - to: pricingProfileKey
         const: 019fca0c-f9f2-7044-bc42-90912dbf150b
@@ -120,10 +120,10 @@ entities:
       # contact carrying the same name and email.
       - to: contactList[0].firstName
         from: first_name
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: contactList[0].lastName
         from: last_name
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: contactList[0].emailAddress
         from: email
         transform: [trim, email]
@@ -162,13 +162,13 @@ entities:
       # is concerned. Nulls let the empty ones drop out.
       - to: addressList[0].address1
         from: address1
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: addressList[0].address2
         from: address2
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: addressList[0].city
         from: city
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: addressList[0].region
         from: state
         transform: [trim, upper, nullif_empty]
@@ -189,13 +189,13 @@ entities:
       # the payload is built rather than posted as an empty address.
       - to: addressList[1].address1
         from: physical_address1
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: addressList[1].address2
         from: physical_address2
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: addressList[1].city
         from: physical_city
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: addressList[1].region
         from: physical_state
         transform: [trim, upper, nullif_empty]
@@ -273,10 +273,10 @@ entities:
       # The customer, denormalised. This is the decision.
       - to: customerFirstName
         from: customer_first_name
-        transform: [trim]
+        transform: [safe_text, trim]
       - to: customerLastName
         from: customer_last_name
-        transform: [trim]
+        transform: [safe_text, trim]
       - to: customerDisplayName
         from: [customer_first_name, customer_last_name]
         transform:
@@ -295,13 +295,13 @@ entities:
 
       - to: installAddress.address1
         from: customer_address1
-        transform: [trim]
+        transform: [safe_text, trim]
       - to: installAddress.address2
         from: customer_address2
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: installAddress.city
         from: customer_city
-        transform: [trim]
+        transform: [safe_text, trim]
       - to: installAddress.region
         from: customer_state
         transform: [trim, upper]
@@ -321,16 +321,16 @@ entities:
         transform: [trim]
       - to: vehicle.make
         from: vehicle_make
-        transform: [trim]
+        transform: [safe_text, trim]
       - to: vehicle.model
         from: vehicle_model
-        transform: [trim]
+        transform: [safe_text, trim]
       - to: vehicle.bodyStyle
         from: vehicle_body
-        transform: [trim, nullif_empty]
+        transform: [safe_text, trim, nullif_empty]
       - to: vehicle.plate
         from: vehicle_plate
-        transform: [trim, upper, nullif_empty]
+        transform: [safe_text, trim, upper, nullif_empty]
       - to: vehicle.mileage
         from: vehicle_mileage
         transform: [trim, nullif_empty]
@@ -341,13 +341,13 @@ entities:
       # Dates and the loss.
       - to: installDate
         from: install_date
-        transform: [to_date]
+        transform: [{to_datetime: {at: "12:00:00"}}]
       - to: dateOfLoss
         from: loss_date
-        transform: [to_date]
+        transform: [{to_datetime: {at: "12:00:00"}}]
       - to: referralDate
         from: referral_date
-        transform: [to_date]
+        transform: [{to_datetime: {at: "12:00:00"}}]
       - to: causeOfLoss
         from: loss_cause
         transform: [trim, nullif_empty]
