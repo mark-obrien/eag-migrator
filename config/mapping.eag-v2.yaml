@@ -94,9 +94,10 @@ entities:
       - to: taxExemptNo
         from: tax_exempt_number
         transform: [trim, nullif_empty]
+      # DateOnly, like dateOfLoss — wants 'YYYY-MM-DD', not a datetime.
       - to: taxExemptExpDate
         from: tax_exempt_expiration
-        transform: [{to_datetime: {at: "12:00:00"}}]
+        transform: [to_date]
 
       - to: pricingProfileKey
         const: 019fca0c-f9f2-7044-bc42-90912dbf150b
@@ -338,16 +339,25 @@ entities:
         from: nags_car_id
         transform: [trim, nullif_empty]
 
-      # Dates and the loss.
+      # Dates. v3 has TWO date types and they need different shapes:
+      #   * installDate is a DateTime. Sent date-only it rendered a day early
+      #     (a browser reads 'YYYY-MM-DD' as UTC midnight), so it is anchored
+      #     at noon — 'YYYY-MM-DDT12:00:00', which v3 accepts and displays on
+      #     the right day.
+      #   * dateOfLoss and referralDate are DateOnly. They REJECT a datetime
+      #     ("not in a supported DateOnly format") and want 'YYYY-MM-DD'. A
+      #     DateOnly has no time to shift, so it never had the day-early bug —
+      #     to_date is correct and the noon anchoring here was a mistake that
+      #     422'd every job carrying a loss date.
       - to: installDate
         from: install_date
         transform: [{to_datetime: {at: "12:00:00"}}]
       - to: dateOfLoss
         from: loss_date
-        transform: [{to_datetime: {at: "12:00:00"}}]
+        transform: [to_date]
       - to: referralDate
         from: referral_date
-        transform: [{to_datetime: {at: "12:00:00"}}]
+        transform: [to_date]
       - to: causeOfLoss
         from: loss_cause
         transform: [trim, nullif_empty]
