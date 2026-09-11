@@ -141,9 +141,13 @@ entities:
       # records hold.
       # v3 answers "Phone number must contain only digits" to the E.164 that
       # `phone` produces, and its own records hold ten bare digits.
+      # phone first, then the number `eagm link` recovered from the customer's
+      # jobs (enriched_phone) for customers v2 left with no phone — v3 refuses a
+      # customer without one. coalesce takes the first non-empty of the two.
       - to: phoneList[0].phoneNumber
-        from: phone
+        from: [phone, enriched_phone]
         transform:
+          - coalesce
           - phone
           - digits: {last: 10}
       - to: phoneList[0].phoneType

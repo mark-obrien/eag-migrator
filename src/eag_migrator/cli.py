@@ -1072,13 +1072,20 @@ def link_cmd() -> None:
     before any of it reaches v3. Run it after `harvest` and before `run`.
     """
     _settings()
-    from .link import link_jobs_to_customers, render_markdown
+    from .link import enrich_customer_phones, link_jobs_to_customers, render_markdown
 
     if not STAGING_DB.exists():
         console.print("[red]No staging database.[/red] Run [bold]eagm harvest[/bold] first.")
         raise typer.Exit(1)
 
     report = link_jobs_to_customers(STAGING_DB)
+    enriched = enrich_customer_phones(STAGING_DB)
+    console.print(
+        f"Recovered a phone from jobs for [bold]{enriched.enriched:,}[/bold] of "
+        f"{enriched.phoneless:,} phoneless customers "
+        f"([dim]{enriched.no_source:,} had none on any job, "
+        f"{enriched.ambiguous:,} ambiguous[/dim])."
+    )
     table = Table(title="Linking jobs to customers", header_style="bold")
     table.add_column("Outcome")
     table.add_column("Jobs", justify="right")

@@ -162,6 +162,85 @@ def link_jobs_to_customers(db_path: Path) -> LinkReport:
         conn.close()
 
 
+ENRICHED_PHONE_COLUMN = "enriched_phone"
+
+
+@dataclass
+class EnrichReport:
+    phoneless: int = 0
+    enriched: int = 0
+    no_source: int = 0
+    ambiguous: int = 0
+
+
+def enrich_customer_phones(db_path: Path) -> EnrichReport:
+    """Backfill a phone onto customers that have none, from their jobs.
+
+    v3 refuses a customer with no phone. Some of those customers appear on a
+    job, and the job carries the phone that was taken at the counter. This
+    recovers it — but only when the answer is unambiguous: the job(s) for that
+    customer agree on ONE number, and the customer's name is not shared by
+    another phoneless customer. A wrong phone is not as damaging as a wrong
+    job-owner, but it is still fabricated contact data, so anything uncertain
+    is left for a person. The value goes in a separate column; the harvested
+    phone is not overwritten.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            conn.execute(
+                f'ALTER TABLE customer_details ADD COLUMN "{ENRICHED_PHONE_COLUMN}" TEXT'
+            )
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(f'UPDATE customer_details SET "{ENRICHED_PHONE_COLUMN}" = NULL')
+
+        customers = [dict(r) for r in conn.execute("SELECT * FROM customer_details")]
+        jobs = [dict(r) for r in conn.execute("SELECT * FROM jobs")]
+
+        def has_phone(c: dict) -> bool:
+            return len(_digits(c.get("phone"))) == 10 or len(_digits(c.get("alt_phone"))) == 10
+
+        phoneless = [c for c in customers if not has_phone(c)]
+
+        by_cust: dict[str, set[str]] = defaultdict(set)
+        by_name: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for j in jobs:
+            ph = _digits(j.get("customer_phone"))
+            if len(ph) != 10:
+                continue
+            if j.get("matched_customer_id") is not None:
+                by_cust[str(j["matched_customer_id"])].add(ph)
+            nm = (_norm(j.get("customer_first_name")), _norm(j.get("customer_last_name")))
+            if any(nm):
+                by_name[nm].add(ph)
+
+        # A name shared by more than one phoneless customer cannot be assigned.
+        from collections import Counter
+        pl_names = Counter(_person(c) for c in phoneless)
+
+        report = EnrichReport(phoneless=len(phoneless))
+        for c in phoneless:
+            phones = by_cust.get(str(c["id"]))
+            if not phones and pl_names[_person(c)] == 1:
+                phones = by_name.get(_person(c))
+            if not phones:
+                report.no_source += 1
+            elif len(phones) == 1:
+                conn.execute(
+                    f'UPDATE customer_details SET "{ENRICHED_PHONE_COLUMN}" = ? WHERE id = ?',
+                    (next(iter(phones)), c["id"]),
+                )
+                report.enriched += 1
+            else:
+                report.ambiguous += 1
+        conn.commit()
+        return report
+    finally:
+        conn.close()
+
+
 def render_markdown(report: LinkReport) -> str:
     lines = ["# Linking jobs to customers\n"]
     lines.append(f"- Jobs: **{report.jobs:,}**  Customers: **{report.customers:,}**")

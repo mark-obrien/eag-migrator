@@ -142,6 +142,61 @@ def test_running_it_twice_gives_the_same_answer(db):
     assert _matches(db) == first_match
 
 
+def _enrich(db):
+    from eag_migrator.link import enrich_customer_phones, ENRICHED_PHONE_COLUMN
+    rep = enrich_customer_phones(db)
+    conn = sqlite3.connect(db)
+    vals = {r[0]: r[1] for r in conn.execute(
+        f'SELECT id, "{ENRICHED_PHONE_COLUMN}" FROM customer_details')}
+    conn.close()
+    return rep, vals
+
+
+def test_enrich_recovers_a_phone_from_the_customers_job(db):
+    _seed(db,
+          [("c1", "Dana", "Reyes", None, None, None, "55119")],
+          [("j1", "Dana", "Reyes", None, "651-555-1000", "55119")])
+    rep, vals = _enrich(db)
+
+    assert rep.enriched == 1
+    assert vals["c1"] == "6515551000"
+
+
+def test_enrich_refuses_when_the_jobs_disagree_on_the_number(db):
+    """Two different numbers for the same name is not a safe backfill."""
+    _seed(db,
+          [("c1", "Dana", "Reyes", None, None, None, "55119")],
+          [("j1", "Dana", "Reyes", None, "6515551000", "55119"),
+           ("j2", "Dana", "Reyes", None, "6515559999", "55119")])
+    rep, vals = _enrich(db)
+
+    assert rep.enriched == 0
+    assert rep.ambiguous == 1
+    assert vals["c1"] is None
+
+
+def test_enrich_refuses_when_two_phoneless_customers_share_a_name(db):
+    """Can't tell which of two same-named customers the job phone belongs to."""
+    _seed(db,
+          [("c1", "Dana", "Reyes", None, None, None, "55119"),
+           ("c2", "Dana", "Reyes", None, None, None, "55444")],
+          [("j1", "Dana", "Reyes", None, "6515551000", "55119")])
+    rep, vals = _enrich(db)
+
+    assert rep.enriched == 0
+    assert vals["c1"] is None and vals["c2"] is None
+
+
+def test_enrich_leaves_a_customer_who_already_has_a_phone_alone(db):
+    _seed(db,
+          [("c1", "Dana", "Reyes", None, "6515552000", None, "55119")],
+          [("j1", "Dana", "Reyes", None, "6515559999", "55119")])
+    rep, vals = _enrich(db)
+
+    assert rep.phoneless == 0
+    assert vals["c1"] is None  # enriched column stays empty; real phone untouched
+
+
 def test_a_link_that_no_longer_holds_is_cleared_rather_than_left_behind(db):
     _seed(db,
           [("c1", "Dana", "Reyes", None, "6515551000", None, "55119")],
