@@ -142,6 +142,31 @@ def test_running_it_twice_gives_the_same_answer(db):
     assert _matches(db) == first_match
 
 
+def test_compose_job_notes_folds_notes_parts_and_payments(db):
+    from eag_migrator.link import compose_job_notes
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE job_notes (job_id, note_id, heading, created_at, body, print_on_invoice)")
+    conn.execute("CREATE TABLE job_parts (job_id, part_number, nags_part_number, nags_description, nags_colour)")
+    conn.execute("CREATE TABLE job_payments (job_id, amount, paid_at, status, processor, description)")
+    conn.execute("INSERT INTO job_notes VALUES ('7','1','hdr','01/02/2026','Call before arrival',1)")
+    conn.execute("INSERT INTO job_parts VALUES ('7','DW01','DW01N','WINDSHIELD','Gray Tint Privacy')")
+    conn.execute("INSERT INTO job_payments VALUES ('7','$\n 100.50','01/03/2026','PAID','stripe','?junk PHP?')")
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    notes = compose_job_notes(conn, "7")
+    conn.close()
+
+    contents = [n["content"] for n in notes]
+    assert any("Call before arrival" in c for c in contents)
+    assert any(c == "Part: DW01 WINDSHIELD - Gray Tint Privacy" for c in contents)  # dash, not parens (WAF)
+    pay = next(c for c in contents if c.startswith("Payment"))
+    assert "reference only" in pay and "$100.50" in pay
+    assert "junk" not in pay  # the broken description column is dropped
+    # the real note keeps its print flag; synthesised ones do not print
+    assert next(n for n in notes if "Call before" in n["content"])["isPrintable"] is True
+    assert all(n["isPrintable"] is False for n in notes if n["content"].startswith(("Part:", "Payment")))
+
+
 def _enrich(db):
     from eag_migrator.link import enrich_customer_phones, ENRICHED_PHONE_COLUMN
     rep = enrich_customer_phones(db)

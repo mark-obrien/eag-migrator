@@ -162,6 +162,58 @@ def link_jobs_to_customers(db_path: Path) -> LinkReport:
         conn.close()
 
 
+def compose_job_notes(conn: sqlite3.Connection, job_id: Any) -> list[dict[str, Any]]:
+    """Fold a job's v2 notes, parts and payments into one v3 notes[] array.
+
+    v3 has no place for v2's glass parts (its jobLineItems shape is unknown and
+    unpriced here) or its payments (no endpoint, and a payment is not something
+    to assert into v3's ledger from a scrape). But all three are real job
+    history worth keeping, and v3's note is free text — so each becomes a note,
+    the payments explicitly marked reference-only so no one reads them as posted
+    money. Real notes keep their own print-on-invoice flag; synthesised ones do
+    not print by default.
+    """
+    def clean(s: Any) -> str:
+        return " ".join(str(s or "").split())
+
+    def money(s: Any) -> str | None:
+        digits = re.sub(r"[^\d.]", "", str(s or ""))
+        return digits or None
+
+    notes: list[dict[str, Any]] = []
+    for r in conn.execute(
+        "SELECT * FROM job_notes WHERE job_id=? ORDER BY note_id", (job_id,)
+    ):
+        body = clean(r["body"])
+        if not body:
+            continue
+        when = clean(r["created_at"])
+        notes.append({"content": body + (f"  ({when})" if when else ""),
+                      "isPrintable": bool(r["print_on_invoice"])})
+    for r in conn.execute("SELECT * FROM job_parts WHERE job_id=?", (job_id,)):
+        pn = clean(r["part_number"]) or clean(r["nags_part_number"])
+        # Colour is joined with a dash, not parentheses. v3's web firewall
+        # rejected at least one benign part string once it was wrapped in
+        # parens ("QUARTER (Gray Tint Privacy)" -> 403, unparenthesised -> 200),
+        # for a rule opaque from outside, so the parens are simply avoided.
+        colour = clean(r["nags_colour"])
+        bits = [b for b in (pn, clean(r["nags_description"]),
+                            f"- {colour}" if colour else "") if b]
+        if bits:
+            notes.append({"content": "Part: " + " ".join(bits), "isPrintable": False})
+    for r in conn.execute("SELECT * FROM job_payments WHERE job_id=?", (job_id,)):
+        # The harvested payment `description` is a broken template fragment, so
+        # it is deliberately not used.
+        amt = money(r["amount"]); when = clean(r["paid_at"])
+        seg = [f"${amt}" if amt else "", f"on {when}" if when else "",
+               clean(r["status"]), f"via {clean(r['processor'])}" if clean(r["processor"]) else ""]
+        line = " ".join(s for s in seg if s)
+        if line:
+            notes.append({"content": "Payment (from v2, reference only): " + line,
+                          "isPrintable": False})
+    return notes
+
+
 ENRICHED_PHONE_COLUMN = "enriched_phone"
 
 
